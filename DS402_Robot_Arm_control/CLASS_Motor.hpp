@@ -1,4 +1,4 @@
-#ifndef CLASS_MOTOR_HPP
+ï»¿#ifndef CLASS_MOTOR_HPP
 #define CLASS_MOTOR_HPP
 
 #include <cstdint>
@@ -8,59 +8,61 @@
 #include <mutex>
 
 /**
- * @brief DS402 Ğ­ÒéÏÂ³£ÓÃ¶ÔÏó×ÖµäµØÖ·Ê¾Àı£¨½ö¹©²Î¿¼£©
- * Ò»°ãÊÇ 0xXXXX:subIndex, ¿ÉÒÔÔÚÕâÀïÍ³Ò»ÉùÃ÷¡£
+ * @brief DS402 åè®®ä¸‹å¸¸ç”¨å¯¹è±¡å­—å…¸åœ°å€ç¤ºä¾‹ï¼ˆä»…ä¾›å‚è€ƒï¼‰
+ * ä¸€èˆ¬æ˜¯ 0xXXXX:subIndex, å¯ä»¥åœ¨è¿™é‡Œç»Ÿä¸€å£°æ˜ã€‚
  */
-static constexpr uint16_t OD_CONTROL_WORD = 0x6040;  /// ¿ØÖÆ×Ö>>> 0x6040
-static constexpr uint16_t OD_STATUS_WORD = 0x6041;  /// ×´Ì¬×Ö<<< 0x6041
-static constexpr uint16_t OD_MODES_OF_OPERATION = 0x6060;  /// ÔËĞĞÄ£Ê½(Ğ´)>>> 0x6060
-static constexpr uint16_t OD_MODES_OF_DISPLAY = 0x6061;  /// ÔËĞĞÄ£Ê½(¶Á)<<< 0x6061
-static constexpr uint16_t OD_ERROR_CODE = 0x603F;  /// ´íÎóÂë<<< 0x603F
+static constexpr uint16_t OD_CONTROL_WORD = 0x6040;  /// æ§åˆ¶å­—>>> 0x6040
+static constexpr uint16_t OD_STATUS_WORD = 0x6041;  /// çŠ¶æ€å­—<<< 0x6041
+static constexpr uint16_t OD_MODES_OF_OPERATION = 0x6060;  /// è¿è¡Œæ¨¡å¼(å†™)>>> 0x6060
+static constexpr uint16_t OD_MODES_OF_DISPLAY = 0x6061;  /// è¿è¡Œæ¨¡å¼(è¯»)<<< 0x6061
+static constexpr uint16_t OD_ERROR_CODE = 0x603F;  /// é”™è¯¯ç <<< 0x603F
 
-static constexpr uint16_t OD_TARGET_CURRENT = 0x6071;  /// Ä¿±êµçÁ÷>>> 0x6071
-static constexpr uint16_t OD_ACTUAL_CURRENT = 0x6078;  /// Êµ¼ÊµçÁ÷<<< 0x6078
-static constexpr uint16_t OD_TARGET_POSITION = 0x607A;  /// Ä¿±êÎ»ÖÃ>>> 0x607A
-static constexpr uint16_t OD_ACTUAL_POSITION = 0x6064;  /// Êµ¼ÊÎ»ÖÃ<<< 0x6064
-static constexpr uint16_t OD_TARGET_VELOCITY = 0x60FF;  /// Ä¿±êËÙ¶È>>> 0x60FF
-static constexpr uint16_t OD_ACTUAL_VELOCITY = 0x606C;  /// Êµ¼ÊËÙ¶È<<< 0x606C
+static constexpr uint16_t OD_TARGET_CURRENT = 0x6071;  /// ç›®æ ‡ç”µæµ>>> 0x6071
+static constexpr uint16_t OD_ACTUAL_CURRENT = 0x6078;  /// å®é™…ç”µæµ<<< 0x6078
+static constexpr uint16_t OD_TARGET_POSITION = 0x607A;  /// ç›®æ ‡ä½ç½®>>> 0x607A
+static constexpr uint16_t OD_ACTUAL_POSITION = 0x6064;  /// å®é™…ä½ç½®<<< 0x6064
+static constexpr uint16_t OD_TARGET_VELOCITY = 0x60FF;  /// ç›®æ ‡é€Ÿåº¦>>> 0x60FF
+static constexpr uint16_t OD_ACTUAL_VELOCITY = 0x606C;  /// å®é™…é€Ÿåº¦<<< 0x606C
 
-static constexpr uint16_t OD_ACCELERATION = 0x6083;  /// ¼ÓËÙ¶È>>> 0x6083
-static constexpr uint16_t OD_DECELERATION = 0x6084;  /// ¼õËÙ¶È>>> 0x6084
+static constexpr uint16_t OD_ACCELERATION = 0x6083;  /// åŠ é€Ÿåº¦>>> 0x6083
+static constexpr uint16_t OD_DECELERATION = 0x6084;  /// å‡é€Ÿåº¦>>> 0x6084
 
 
 /**
- * @brief ÓÃÓÚ±íÊ¾ DS402 ÖĞ³£¼ûµÄµç»úÔËĞĞÄ£Ê½
- * ÕâÀïÖ»ÊÇÊ¾Àı£¬¾ßÌå¿É¸ù¾İËùÓÃÇı¶¯µÄ DS402 ÊµÏÖÏ¸½ÚÔö¸Ä
+ * @brief ç”¨äºè¡¨ç¤º DS402 ä¸­å¸¸è§çš„ç”µæœºè¿è¡Œæ¨¡å¼
+ * è¿™é‡Œåªæ˜¯ç¤ºä¾‹ï¼Œå…·ä½“å¯æ ¹æ®æ‰€ç”¨é©±åŠ¨çš„ DS402 å®ç°ç»†èŠ‚å¢æ”¹
  */
 enum class MotorMode : uint8_t {
-    PROFILE_POSITION = 1,  // Î»ÖÃÄ£Ê½
-    PROFILE_VELOCITY = 3,  // ËÙ¶ÈÄ£Ê½
-    PROFILE_TORQUE = 4,  // Á¦¾Ø/µçÁ÷Ä£Ê½
-    HOMING_MODE = 6,  // »ØÁãÄ£Ê½
-    INTERPOLATED_POS = 7,  // ²åÖµÎ»ÖÃÄ£Ê½
-    CYCLIC_SYNC_POS = 8,  // Í¬²½ÖÜÆÚÎ»ÖÃ
-    CYCLIC_SYNC_VEL = 9,  // Í¬²½ÖÜÆÚËÙ¶È
-    CYCLIC_SYNC_TORQUE = 10, // Í¬²½ÖÜÆÚÁ¦¾Ø
+    PROFILE_POSITION = 1,  // ä½ç½®æ¨¡å¼
+    PROFILE_VELOCITY = 3,  // é€Ÿåº¦æ¨¡å¼
+    PROFILE_TORQUE = 4,  // åŠ›çŸ©/ç”µæµæ¨¡å¼
+    HOMING_MODE = 6,  // å›é›¶æ¨¡å¼
+    INTERPOLATED_POS = 7,  // æ’å€¼ä½ç½®æ¨¡å¼
+    CYCLIC_SYNC_POS = 8,  // åŒæ­¥å‘¨æœŸä½ç½®
+    CYCLIC_SYNC_VEL = 9,  // åŒæ­¥å‘¨æœŸé€Ÿåº¦
+    CYCLIC_SYNC_TORQUE = 10, // åŒæ­¥å‘¨æœŸåŠ›çŸ©
 };
-
 /**
- * @brief ×´Ì¬ºÍÄ£Ê½½á¹¹Ìå
- *
- * - ÕâÀï½öÊ¾ÀıÌí¼ÓÁË¿ØÖÆ×Ö¡¢×´Ì¬×Ö¡¢ÔËĞĞÄ£Ê½¡¢´íÎóÂëµÈ
- * - ÓÉÓÚÓÃ»§ÒªÇó£º¼´Ê¹Âß¼­ÉÏÊÇ S16/U16£¬Ò²ÓÃ uint8_t Êı×é±£´æÔ­Ê¼Öµ
- * - ¡°Êı¾İ±í¡±µÈ¿ÉÒÔ¸ù¾İĞèÒªÀ©Õ¹Îª std::array »ò std::vector
+ * @brief çŠ¶æ€å’Œæ¨¡å¼ç»“æ„ä½“ (StateAndMode)
+ * @brief StateAndMode::refresh ç”¨äºæ ‡è®°æ•°æ®æ˜¯å¦å·²åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief StateAndMode::controlWordRaw æ§åˆ¶å­—(0x6040) åŸå§‹2å­—èŠ‚
+ * @brief StateAndMode::statusWordRaw çŠ¶æ€å­—(0x6041) åŸå§‹2å­—èŠ‚
+ * @brief StateAndMode::modeOfOperationRaw è¿è¡Œæ¨¡å¼(0x6060) åŸå§‹1å­—èŠ‚
+ * @brief StateAndMode::errorCodeRaw ç”µæœºé”™è¯¯ç (0x603F) åŸå§‹2å­—èŠ‚
  */
 struct StateAndMode
 {
-    // DS402: ¿ØÖÆ×Ö(0x6040)¡¢×´Ì¬×Ö(0x6041)Í¨³£¸÷2×Ö½Ú
-    // ÔËĞĞÄ£Ê½(0x6060)Í¨³£1×Ö½Ú£¬´íÎóÂë(0x603F)Í¨³£2×Ö½Ú
-    // ÒÔÏÂÖ»ÊÇÊ¾Àı£¬°ÑÔ­Ê¼×Ö½Ú¶¼·ÅÔÚÕâÀï
-    volatile uint8_t controlWordRaw[2];       /// ¿ØÖÆ×Ö£¨Ô­Ê¼2×Ö½Ú£©>>
-    volatile uint8_t statusWordRaw[2];        /// ×´Ì¬×Ö£¨Ô­Ê¼2×Ö½Ú£©<<
-    volatile uint8_t modeOfOperationRaw[1];   /// ÔËĞĞÄ£Ê½£¨Ô­Ê¼1×Ö½Ú£©>>
-    volatile uint8_t errorCodeRaw[2];         /// µç»ú´íÎó´úÂë£¨Ô­Ê¼2×Ö½Ú£©<<
+    //åŸå­ç±»å‹å¸ƒå°”å˜é‡ï¼Œç¡®ä¿è¯»å†™çš„æ—¶å€™ä¸ä¼šå‡ºç°å¤šçº¿ç¨‹åŒæ­¥é—®é¢˜
+    // true å·²åˆ·æ–° false æœªåˆ·æ–°
+    std::atomic<bool> refresh = true;
 
-    // 
+    // DS402: æ§åˆ¶å­—(0x6040)ã€çŠ¶æ€å­—(0x6041)é€šå¸¸å„2å­—èŠ‚
+    // è¿è¡Œæ¨¡å¼(0x6060)é€šå¸¸1å­—èŠ‚ï¼Œé”™è¯¯ç (0x603F)é€šå¸¸2å­—èŠ‚
+    volatile uint8_t controlWordRaw[2];       /// æ§åˆ¶å­—ï¼ˆåŸå§‹2å­—èŠ‚ï¼‰>>
+    volatile uint8_t statusWordRaw[2];        /// çŠ¶æ€å­—ï¼ˆåŸå§‹2å­—èŠ‚ï¼‰<<
+    volatile uint8_t modeOfOperationRaw[1];   /// è¿è¡Œæ¨¡å¼ï¼ˆåŸå§‹1å­—èŠ‚ï¼‰>>
+    volatile uint8_t errorCodeRaw[2];         /// ç”µæœºé”™è¯¯ä»£ç ï¼ˆåŸå§‹2å­—èŠ‚ï¼‰<<
+
     const uint16_t controlWordIndex = OD_CONTROL_WORD;      // 0x6040
     const uint16_t statusWordIndex = OD_STATUS_WORD;       // 0x6041
     const uint16_t modeOfOperationIndex = OD_MODES_OF_OPERATION;// 0x6060
@@ -68,77 +70,107 @@ struct StateAndMode
 };
 
 /**
- * @brief µçÁ÷½á¹¹Ìå
- *
- * - Êµ¼ÊÍ¨³£ÊÇ S16 / U16£¬µ«ÕâÀï°´ÒªÇóÊ¹ÓÃ uint8_t Êı×é´æ´¢Ô­Ê¼Öµ
- * - Í¬Àí¡°ÖµµÄÀàĞÍ¡±¾Í½öÔÚ×¢ÊÍÖĞËµÃ÷
+ * @brief ç”µæµç»“æ„ä½“ (MotorCurrent)
+ * @brief MotorCurrent::send_refresh    å‘é€æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorCurrent::receive_refresh æ¥æ”¶æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorCurrent::actual_CurrentRaw  å®é™…ç”µæµåŸå§‹2å­—èŠ‚ (S16)
+ * @brief MotorCurrent::target_CurrentRaw  ç›®æ ‡ç”µæµåŸå§‹2å­—èŠ‚ (S16)
+ * @brief MotorCurrent::actual_Current_Encoder  å®é™…ç”µæµæ¢ç®—åç¼–ç å™¨å€¼
+ * @brief MotorCurrent::target_Current_Encoder  ç›®æ ‡ç”µæµæ¢ç®—åç¼–ç å™¨å€¼
+ * @brief MotorCurrent::actual_Current     å®é™…ç”µæµ(æµ®ç‚¹)
+ * @brief MotorCurrent::target_Current     ç›®æ ‡ç”µæµ(æµ®ç‚¹)
  */
 struct MotorCurrent
 {
-    // Ô­Ê¼Êµ¼ÊµçÁ÷£»ÀıÈç S16(2×Ö½Ú)
-    volatile uint8_t actualCurrentRaw[2];
-    // Ô­Ê¼Ä¿±êµçÁ÷£»ÀıÈç S16(2×Ö½Ú)
-    volatile uint8_t targetCurrentRaw[2];
+    // true å·²åˆ·æ–° false æœªåˆ·æ–° æ›´æ”¹å®Œå˜é‡ä»¥åè®°å¾—åˆ·æ–°
+    std::atomic<bool> send_refresh = true;    //å‘é€æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–°
+    std::atomic<bool> receive_refresh = true; //æ¥æ”¶æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–° 
 
-    // ¾­¹ı»»ËãµÃµ½µÄ¡°±àÂëÆ÷Öµ¡±»ò¡°Êµ¼ÊÊıÖµ¡±µÈ£¬¿ÉÔÚ readRefresh() ÖĞ¸üĞÂ
-    //Êµ¼ÊµçÁ÷£¨»»Ëãºó£©<<
-    float actualCurrent = 0.0f;
-    //Ä¿±êµçÁ÷£¨»»Ëãºó£©>>
-    float targetCurrent = 0.0f;
+    // åŸå§‹å®é™…ç”µæµï¼›S16(2å­—èŠ‚)<<
+    volatile uint8_t actual_CurrentRaw[2];
+    // åŸå§‹ç›®æ ‡ç”µæµï¼›S16(2å­—èŠ‚)>>
+    volatile uint8_t target_CurrentRaw[2];
 
-    // Êµ¼ÊµçÁ÷×Öµä 0x6078
-    const uint16_t actualCurrentIndex = OD_ACTUAL_CURRENT; 
-    // Ä¿±êµçÁ÷×Öµä 0x6071
-    const uint16_t targetCurrentIndex = OD_TARGET_CURRENT; 
+    // åŸå§‹å®é™…ç”µæµç»è¿‡æ¢ç®—åçš„ç¼–ç å™¨çš„å€¼ åˆ·æ–°
+    int32_t actual_Current_Encoder = 0;
+    // åŸå§‹ç›®æ ‡ç”µæµç»è¿‡æ¢ç®—åçš„ç¼–ç å™¨çš„å€¼ åˆ·æ–°
+    int32_t target_Current_Encoder = 0;
+
+    // å®é™…ç”µæµï¼ˆæ¢ç®—åï¼‰  åˆ·æ–°
+    float actual_Current = 0.0f;
+    // ç›®æ ‡ç”µæµï¼ˆæ¢ç®—åï¼‰  åˆ·æ–°
+    float target_Current = 0.0f;
+
+    const uint16_t actual_Current_Index = OD_ACTUAL_CURRENT;
+    const uint16_t target_Current_Index = OD_TARGET_CURRENT;
 };
 
 /**
- * @brief Î»ÖÃ½á¹¹Ìå
- *
- * - Î»ÖÃÍ¨³£ÊÇ S32£¬Òò´ËÕâÀïÒÔ 4×Ö½Ú Ô­Ê¼Êı¾İ±íÊ¾
+ * @brief ä½ç½®ç»“æ„ä½“ (MotorPosition)
+ * @brief MotorPosition::send_refresh    å‘é€æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorPosition::receive_refresh æ¥æ”¶æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorPosition::actualPositionRaw  å®é™…ä½ç½®åŸå§‹4å­—èŠ‚ (S32)
+ * @brief MotorPosition::targetPositionRaw  ç›®æ ‡ä½ç½®åŸå§‹4å­—èŠ‚ (S32)
+ * @brief MotorPosition::actual_PositionDeg  å®é™…ä½ç½®æ¢ç®—åè§’åº¦
+ * @brief MotorPosition::target_PositionDeg  ç›®æ ‡ä½ç½®æ¢ç®—åè§’åº¦
+ * @brief MotorPosition::actual_PositionCnt  å®é™…ä½ç½®ç¼–ç å™¨è®¡æ•°
+ * @brief MotorPosition::target_PositionCnt  ç›®æ ‡ä½ç½®ç¼–ç å™¨è®¡æ•°
  */
 struct MotorPosition
 {
-    volatile uint8_t actualPositionRaw[4];
-    volatile uint8_t targetPositionRaw[4];
+    // true å·²åˆ·æ–° false æœªåˆ·æ–° æ›´æ”¹å®Œå˜é‡ä»¥åè®°å¾—åˆ·æ–°
+    std::atomic<bool> send_refresh = true;    //å‘é€æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–°
+    std::atomic<bool> receive_refresh = true; //æ¥æ”¶æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–°
 
-    float actualPositionDeg = 0.0f;  /// Êµ¼ÊÖµ(½Ç¶È)>>
-    float targetPositionDeg = 0.0f;  /// Ä¿±êÖµ(½Ç¶È)<<
+    volatile uint8_t actualPositionRaw[4]; //å®é™…ä½ç½®çš„åŸå§‹æ•°æ®>> 
+    volatile uint8_t targetPositionRaw[4]; //ç›®æ ‡ä½ç½®çš„åŸå§‹æ•°æ®<< 
 
-    // ±àÂëÆ÷Öµ£¨Ê®½øÖÆ£©£¬½öÊ¾Àı
-    int32_t actualPositionCnt = 0;
-    int32_t targetPositionCnt = 0;
+    float actual_PositionDeg = 0.0f;  /// å®é™…å€¼(è§’åº¦)
+    float target_PositionDeg = 0.0f;  /// ç›®æ ‡å€¼(è§’åº¦)
 
-    // ¶ÔÓ¦¶ÔÏó×ÖµäµØÖ·
-    const uint16_t actualPositionIndex = OD_ACTUAL_POSITION; // 0x6064
-    const uint16_t targetPositionIndex = OD_TARGET_POSITION; // 0x607A
+    int32_t actual_PositionCnt = 0;  //å®é™…ä½ç½®çš„ç¼–ç å™¨å€¼
+    int32_t target_PositionCnt = 0;
+
+    const uint16_t actual_Position_Index = OD_ACTUAL_POSITION; // 0x6064
+    const uint16_t target_Position_Index = OD_TARGET_POSITION; // 0x607A
 };
 
 /**
- * @brief ËÙ¶È½á¹¹Ìå
- *
- * - ËÙ¶ÈÒ²¾­³£ÊÇ S32£¬µ«²»ÉÙÇı¶¯½öÓÃ S16 ±íÊ¾¡£ÕâÀïÊ¾ÀıÒÔ 4×Ö½Ú´æ´¢
+ * @brief é€Ÿåº¦ç»“æ„ä½“ (MotorVelocity)
+ * @brief MotorVelocity::send_refresh    å‘é€æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorVelocity::receive_refresh æ¥æ”¶æ•°æ®åˆ·æ–° (true:å·²åˆ·æ–° false:æœªåˆ·æ–°)
+ * @brief MotorVelocity::actualVelocityRaw  å®é™…é€Ÿåº¦åŸå§‹4å­—èŠ‚ (S32)
+ * @brief MotorVelocity::targetVelocityRaw  ç›®æ ‡é€Ÿåº¦åŸå§‹4å­—èŠ‚ (S32)
+ * @brief MotorVelocity::actualVelocityRPM   å®é™…é€Ÿåº¦(rpm)
+ * @brief MotorVelocity::targetVelocityRPM   ç›®æ ‡é€Ÿåº¦(rpm)
+ * @brief MotorVelocity::actualVelocityCnt   å®é™…é€Ÿåº¦çš„ç¼–ç å™¨å€¼
+ * @brief MotorVelocity::targetVelocityCnt   ç›®æ ‡é€Ÿåº¦çš„ç¼–ç å™¨å€¼
  */
 struct MotorVelocity
 {
-    volatile uint8_t actualVelocityRaw[4];//Êµ¼ÊµÄ
+    // true å·²åˆ·æ–° false æœªåˆ·æ–° æ›´æ”¹å®Œå˜é‡ä»¥åè®°å¾—åˆ·æ–°
+    std::atomic<bool> send_refresh = true;    //å‘é€æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–°
+    std::atomic<bool> receive_refresh = true; //æ¥æ”¶æ•°æ®çš„é—´æ¥å˜é‡çš„åˆ·æ–°
+
+    volatile uint8_t actualVelocityRaw[4];//å®é™…çš„
     volatile uint8_t targetVelocityRaw[4];
 
-    float actualVelocityRPM = 0.0f; ///< Êµ¼ÊËÙ¶È (rpm)
-    float targetVelocityRPM = 0.0f; ///< Ä¿±êËÙ¶È (rpm)
+    float actualVelocityRPM = 0.0f; ///< å®é™…é€Ÿåº¦ (rpm)
+    float targetVelocityRPM = 0.0f; ///< ç›®æ ‡é€Ÿåº¦ (rpm)
 
-    int32_t actualVelocityCnt = 0;    ///< ±àÂëÆ÷¼ÆÊıÖµ
-    int32_t targetVelocityCnt = 0;
+    int32_t actualVelocityCnt = 0;    // ç¼–ç å™¨å®é™…é€Ÿåº¦å€¼
+    int32_t targetVelocityCnt = 0;    // ç¼–ç å™¨ç›®æ ‡é€Ÿåº¦å€¼
 
-    // ¶ÔÓ¦¶ÔÏó×ÖµäµØÖ·
     const uint16_t actualVelocityIndex = OD_ACTUAL_VELOCITY; //0x606C
     const uint16_t targetVelocityIndex = OD_TARGET_VELOCITY; //0x60FF
 };
 
 /**
- * @brief ¼Ó¼õËÙ¶È½á¹¹Ìå
- *
- * - DS402 ³£¼ûÊÇ U32£¬ÓÃÓÚÅäÖÃ¼ÓËÙ¶È / ¼õËÙ¶È
+ * @brief åŠ å‡é€Ÿåº¦ç»“æ„ä½“ (MotorAccelDecel)
+ * @brief MotorAccelDecel::accelRaw  åŠ é€Ÿåº¦åŸå§‹4å­—èŠ‚ (U32)
+ * @brief MotorAccelDecel::decelRaw  å‡é€Ÿåº¦åŸå§‹4å­—èŠ‚ (U32)
+ * @brief MotorAccelDecel::accelValue  è§£æåçš„åŠ é€Ÿåº¦æ•°å€¼
+ * @brief MotorAccelDecel::decelValue  è§£æåçš„å‡é€Ÿåº¦æ•°å€¼
  */
 struct MotorAccelDecel
 {
@@ -148,23 +180,23 @@ struct MotorAccelDecel
     uint32_t accelValue = 0;
     uint32_t decelValue = 0;
 
-    // ¶ÔÓ¦¶ÔÏó×ÖµäµØÖ·
-    const uint16_t accelIndex = OD_ACCELERATION;   //0x6083
-    const uint16_t decelIndex = OD_DECELERATION;   //0x6084
+    const uint16_t accelIndex = OD_ACCELERATION; //0x6083
+    const uint16_t decelIndex = OD_DECELERATION; //0x6084
 };
 
 
+
 /**
- * @brief ºËĞÄµç»úÀà
+ * @brief æ ¸å¿ƒç”µæœºç±»
  *
- * °üº¬£º
- * 1. ×´Ì¬&Ä£Ê½
- * 2. µçÁ÷
- * 3. Î»ÖÃ
- * 4. ËÙ¶È
- * 5. ¼Ó¼õËÙ¶È
+ * åŒ…å«ï¼š
+ * 1. çŠ¶æ€&æ¨¡å¼
+ * 2. ç”µæµ
+ * 3. ä½ç½®
+ * 4. é€Ÿåº¦
+ * 5. åŠ å‡é€Ÿåº¦
  *
- * ÒÔ¼°¼òµ¥µÄ³õÊ¼»¯¡¢¶ÁË¢ĞÂ¡¢Ğ´Ë¢ĞÂµÈ½Ó¿Ú¡£
+ * ä»¥åŠç®€å•çš„åˆå§‹åŒ–ã€è¯»åˆ·æ–°ã€å†™åˆ·æ–°ç­‰æ¥å£ã€‚
  */
 class Motor
 {
@@ -173,29 +205,29 @@ public:
     ~Motor() = default;
 
     /**
-     * @brief ³õÊ¼»¯·½·¨£º
-     *  - ÔİÊ±²»ÊµÏÖ£¬¿ÉÔÚ´Ë½«ËùÓĞÔ­Ê¼Êı¾İÇåÁã£¬»ò½«Ä£Ê½ÖÃÎª°²È«Ä£Ê½µÈ¡£
+     * @brief åˆå§‹åŒ–æ–¹æ³•ï¼š
+     *  - æš‚æ—¶ä¸å®ç°ï¼Œå¯åœ¨æ­¤å°†æ‰€æœ‰åŸå§‹æ•°æ®æ¸…é›¶ï¼Œæˆ–å°†æ¨¡å¼ç½®ä¸ºå®‰å…¨æ¨¡å¼ç­‰ã€‚
      */
     void init()
     {
-        // ´Ë´¦¸ù¾İĞèÇó¶ÔËùÓĞ×Ó½á¹¹µÄÊı¾İ×öÒ»´Î°²È«³õÊ¼»¯
-        // ÀıÈç:
+        // æ­¤å¤„æ ¹æ®éœ€æ±‚å¯¹æ‰€æœ‰å­ç»“æ„çš„æ•°æ®åšä¸€æ¬¡å®‰å…¨åˆå§‹åŒ–
+        // ä¾‹å¦‚:
         for (auto& b : stateAndMode.controlWordRaw) { b = 0; }
         for (auto& b : stateAndMode.statusWordRaw) { b = 0; }
         for (auto& b : stateAndMode.modeOfOperationRaw) { b = 0; }
         for (auto& b : stateAndMode.errorCodeRaw) { b = 0; }
 
-        for (auto& b : current.actualCurrentRaw) { b = 0; }
-        for (auto& b : current.targetCurrentRaw) { b = 0; }
-        current.actualCurrent = 0.0f;
-        current.targetCurrent = 0.0f;
+        for (auto& b : current.actual_CurrentRaw) { b = 0; }
+        for (auto& b : current.target_CurrentRaw) { b = 0; }
+        current.actual_Current = 0.0f;
+        current.target_Current = 0.0f;
 
         for (auto& b : position.actualPositionRaw) { b = 0; }
         for (auto& b : position.targetPositionRaw) { b = 0; }
-        position.actualPositionDeg = 0.0f;
-        position.targetPositionDeg = 0.0f;
-        position.actualPositionCnt = 0;
-        position.targetPositionCnt = 0;
+        position.actual_PositionDeg = 0.0f;
+        position.target_PositionDeg = 0.0f;
+        position.actual_PositionCnt = 0;
+        position.target_PositionCnt = 0;
 
         for (auto& b : velocity.actualVelocityRaw) { b = 0; }
         for (auto& b : velocity.targetVelocityRaw) { b = 0; }
@@ -213,37 +245,37 @@ public:
     }
 
     /**
-     * @brief ¶ÁË¢ĞÂ·½·¨
+     * @brief è¯»åˆ·æ–°æ–¹æ³•
      *
-     * Ò»°ãÔÚ¡°½ÓÊÕÏß³Ì¡±¶Ô PDO/SDO ÊÕµ½µÄÔ­Ê¼Êı¾İ (uint8_t[]) ×öÓ³Éäºó£¬
-     * Ğ´Èëµ½±¾µØ Motor Àà¶ÔÓ¦×Ö¶Î¡£È»ºóÕâÀï¿ÉÒÔ½øĞĞ¶îÍâµÄÊıÖµ»»Ëã£¬±ÈÈç°Ñ Raw ×ª»»³ÉÊµ¼ÊÖµ¡£
+     * ä¸€èˆ¬åœ¨â€œæ¥æ”¶çº¿ç¨‹â€å¯¹ PDO/SDO æ”¶åˆ°çš„åŸå§‹æ•°æ® (uint8_t[]) åšæ˜ å°„åï¼Œ
+     * å†™å…¥åˆ°æœ¬åœ° Motor ç±»å¯¹åº”å­—æ®µã€‚ç„¶åè¿™é‡Œå¯ä»¥è¿›è¡Œé¢å¤–çš„æ•°å€¼æ¢ç®—ï¼Œæ¯”å¦‚æŠŠ Raw è½¬æ¢æˆå®é™…å€¼ã€‚
      */
     void readRefresh()
     {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        // (Ê¾Àı) ½« raw µÄ¿ØÖÆ×Ö/×´Ì¬×Ö/Ä£Ê½µÈ×ª»»³ÉĞèÒªµÄ int »òÃ¶¾Ù£º
+        // (ç¤ºä¾‹) å°† raw çš„æ§åˆ¶å­—/çŠ¶æ€å­—/æ¨¡å¼ç­‰è½¬æ¢æˆéœ€è¦çš„ int æˆ–æšä¸¾ï¼š
         // controlWord = (uint16_t)( (stateAndMode.controlWordRaw[1] << 8) |
         //                            stateAndMode.controlWordRaw[0] );
         // ...
         // modeOfOperation = (MotorMode)(stateAndMode.modeOfOperationRaw[0]);
 
-        // µçÁ÷
+        // ç”µæµ
         {
-            // µÍ×Ö½ÚÔÚ [0], ¸ß×Ö½ÚÔÚ [1]£¬ÕâÖ»ÊÇ¾ÙÀı£»ÈôÊÇĞ¡¶Ë¾ÍÒªÏà·´¡£
+            // ä½å­—èŠ‚åœ¨ [0], é«˜å­—èŠ‚åœ¨ [1]ï¼Œè¿™åªæ˜¯ä¸¾ä¾‹ï¼›è‹¥æ˜¯å°ç«¯å°±è¦ç›¸åã€‚
             int16_t actualI = static_cast<int16_t>(
-                (current.actualCurrentRaw[1] << 8) | current.actualCurrentRaw[0]);
+                (current.actual_CurrentRaw[1] << 8) | current.actual_CurrentRaw[0]);
             int16_t targetI = static_cast<int16_t>(
-                (current.targetCurrentRaw[1] << 8) | current.targetCurrentRaw[0]);
+                (current.target_CurrentRaw[1] << 8) | current.target_CurrentRaw[0]);
 
-            // ×ª»»ÎªÎïÀíÁ¿(½öÊ¾Àı£¬ÈçÇı¶¯ÎÄµµ¹æ¶¨ 1¸ö¼ÆÊı=1mA)
-            current.actualCurrent = static_cast<float>(actualI);
-            current.targetCurrent = static_cast<float>(targetI);
+            // è½¬æ¢ä¸ºç‰©ç†é‡(ä»…ç¤ºä¾‹ï¼Œå¦‚é©±åŠ¨æ–‡æ¡£è§„å®š 1ä¸ªè®¡æ•°=1mA)
+            current.actual_Current = static_cast<float>(actualI);
+            current.target_Current = static_cast<float>(targetI);
         }
 
-        // Î»ÖÃ
+        // ä½ç½®
         {
-            // ¼ÙÉè raw[0] Îª×îµÍ×Ö½Ú
+            // å‡è®¾ raw[0] ä¸ºæœ€ä½å­—èŠ‚
             int32_t actualPos = ((int32_t)position.actualPositionRaw[3] << 24) |
                 ((int32_t)position.actualPositionRaw[2] << 16) |
                 ((int32_t)position.actualPositionRaw[1] << 8) |
@@ -253,14 +285,14 @@ public:
                 ((int32_t)position.targetPositionRaw[1] << 8) |
                 ((int32_t)position.targetPositionRaw[0]);
 
-            position.actualPositionCnt = actualPos;
-            position.targetPositionCnt = targetPos;
-            // ×ª³É½Ç¶È(½öÊ¾Àı£º¼ÙÉè 65536 ¶ÔÓ¦ 360 ¶È)
-            position.actualPositionDeg = actualPos * (360.0f / 65536.0f);
-            position.targetPositionDeg = targetPos * (360.0f / 65536.0f);
+            position.actual_PositionCnt = actualPos;
+            position.target_PositionCnt = targetPos;
+            // è½¬æˆè§’åº¦(ä»…ç¤ºä¾‹ï¼šå‡è®¾ 65536 å¯¹åº” 360 åº¦)
+            position.actual_PositionDeg = actualPos * (360.0f / 65536.0f);
+            position.target_PositionDeg = targetPos * (360.0f / 65536.0f);
         }
 
-        // ËÙ¶È (Í¬Àí)
+        // é€Ÿåº¦ (åŒç†)
         {
             int32_t actualVel = ((int32_t)velocity.actualVelocityRaw[3] << 24) |
                 ((int32_t)velocity.actualVelocityRaw[2] << 16) |
@@ -273,12 +305,12 @@ public:
 
             velocity.actualVelocityCnt = actualVel;
             velocity.targetVelocityCnt = targetVel;
-            // ½öÊ¾Àı£º¼ÙÉè 1¼ÆÊı=1rpm
+            // ä»…ç¤ºä¾‹ï¼šå‡è®¾ 1è®¡æ•°=1rpm
             velocity.actualVelocityRPM = static_cast<float>(actualVel);
             velocity.targetVelocityRPM = static_cast<float>(targetVel);
         }
 
-        // ¼Ó¼õËÙ¶È
+        // åŠ å‡é€Ÿåº¦
         {
             uint32_t accel = ((uint32_t)accelDecel.accelRaw[3] << 24) |
                 ((uint32_t)accelDecel.accelRaw[2] << 16) |
@@ -295,38 +327,39 @@ public:
     }
 
     /**
-     * @brief Ğ´Ë¢ĞÂ·½·¨
+     * @brief å†™åˆ·æ–°æ–¹æ³•
      *
-     * - µäĞÍÓÃ·¨ÊÇÔÚ¶¨Ê±Æ÷Ïß³ÌÖĞ£¬¸ù¾İ Motor ¶ÔÏóÖĞ targetXXX µÄÖµ×é×°Òª·¢ËÍµÄ SDO/PDO Êı¾İ
-     * - ²¢Ğ´Èëµ½ motorXXRaw[] ÖĞ£¬È»ºóµ÷ÓÃÊµ¼ÊµÄ·¢ËÍº¯Êı
+     * - å…¸å‹ç”¨æ³•æ˜¯åœ¨å®šæ—¶å™¨çº¿ç¨‹ä¸­ï¼Œæ ¹æ® Motor å¯¹è±¡ä¸­ targetXXX çš„å€¼ç»„è£…è¦å‘é€çš„ SDO/PDO æ•°æ®
+     * - å¹¶å†™å…¥åˆ° motorXXRaw[] ä¸­ï¼Œç„¶åè°ƒç”¨å®é™…çš„å‘é€å‡½æ•°
      */
     void writeRefresh()
     {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        // ÀıÈç£º½« targetPositionDeg ×ª»Ø raw[0..3]
-        // ²¢ÓÉÉÏÎ»»úµÄ·¢ËÍÏß³ÌÊµ¼Ê·¢ËÍ SDO/PDO
-        // ÕâÀïÖ»ÊÇÑİÊ¾
-        int32_t tarPos = position.targetPositionCnt;
+        // ä¾‹å¦‚ï¼šå°† targetPositionDeg è½¬å› raw[0..3]
+        // å¹¶ç”±ä¸Šä½æœºçš„å‘é€çº¿ç¨‹å®é™…å‘é€ SDO/PDO
+        // è¿™é‡Œåªæ˜¯æ¼”ç¤º
+        int32_t tarPos = position.target_PositionCnt;
         position.targetPositionRaw[0] = (uint8_t)(tarPos & 0xFF);
         position.targetPositionRaw[1] = (uint8_t)((tarPos >> 8) & 0xFF);
         position.targetPositionRaw[2] = (uint8_t)((tarPos >> 16) & 0xFF);
         position.targetPositionRaw[3] = (uint8_t)((tarPos >> 24) & 0xFF);
 
-        // Í¬Àí targetVelocity, targetCurrent, accel, decel µÈ¶¼¿ÉÒÔĞ´»Ø
+        // åŒç† targetVelocity, targetCurrent, accel, decel ç­‰éƒ½å¯ä»¥å†™å›
         // ...
     }
 
 public:
-    // ÏÂÃæÊÇ¼¸¸ö×Ó½á¹¹£¬¸ù¾İĞèÇó¿ÉÒÔÉèÎª public »ò private
-    StateAndMode    stateAndMode;
-    MotorCurrent    current;
-    MotorPosition   position;
-    MotorVelocity   velocity;
-    MotorAccelDecel accelDecel;
+    
+    
+    StateAndMode    stateAndMode;  //çŠ¶æ€å’Œæ¨¡å¼ç»“æ„ä½“
+    MotorCurrent    current;       //ç”µæµç»“æ„ä½“
+    MotorPosition   position;      //ä½ç½®ç»“æ„ä½“
+    MotorVelocity   velocity;      //é€Ÿåº¦ç»“æ„ä½“
+    MotorAccelDecel accelDecel;    //
 
 private:
-    // ÓÃÓÚ readRefresh / writeRefresh ±£»¤µÄ»¥³âÁ¿
+    // ç”¨äº readRefresh / writeRefresh ä¿æŠ¤çš„äº’æ–¥é‡
     std::mutex mtx_;
 };
 
