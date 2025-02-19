@@ -1,4 +1,4 @@
-#ifndef DATA_PROCESSING_HPP
+ï»¿#ifndef DATA_PROCESSING_HPP
 #define DATA_PROCESSING_HPP
 
 #include <boost/asio/serial_port.hpp>
@@ -14,8 +14,8 @@
 /*************************************/
 /*
 
-Êı¾İ´¦Àí
-Ö÷ÒªÓÃÓÚ¸÷ÖÖÊıÖµ×ª»»£¬´òÓ¡£¬µ÷ÊÔ£¬Æ´×°
+æ•°æ®å¤„ç†
+ä¸»è¦ç”¨äºå„ç§æ•°å€¼è½¬æ¢ï¼Œæ‰“å°ï¼Œè°ƒè¯•ï¼Œæ‹¼è£…
 
 */
 
@@ -24,28 +24,28 @@
 
 
 /**
- * @brief ½«ÊäÈëÖµ×ª»»ÎªÄ¿±ê·¶Î§µÄÖµ£¬²¢·µ»ØÖÁÉÙÁ½Î»Ğ¡ÊıµÄ½á¹û
- * @tparam T ÊäÈëÖµÀàĞÍ£¨¿ÉÒÔÊÇÕûÊı»ò¸¡µãÊı£©
- * @param value ÊäÈëÖµ
- * @param lowerBound ÏÂÏŞ
- * @param upperBound ÉÏÏŞ
- * @return double ÀàĞÍµÄ×ª»»ºóÖµ£¬ÖÁÉÙ±£ÁôÁ½Î»Ğ¡Êı
+ * @brief å°†è¾“å…¥å€¼è½¬æ¢ä¸ºç›®æ ‡èŒƒå›´çš„å€¼ï¼Œå¹¶è¿”å›è‡³å°‘ä¸¤ä½å°æ•°çš„ç»“æœ
+ * @tparam T è¾“å…¥å€¼ç±»å‹ï¼ˆå¯ä»¥æ˜¯æ•´æ•°æˆ–æµ®ç‚¹æ•°ï¼‰
+ * @param value è¾“å…¥å€¼
+ * @param lowerBound ä¸‹é™
+ * @param upperBound ä¸Šé™
+ * @return double ç±»å‹çš„è½¬æ¢åå€¼ï¼Œè‡³å°‘ä¿ç•™ä¸¤ä½å°æ•°
  */
 template <typename T>
 double convertValueWithBounds(T value, double lowerBound, double upperBound) {
-    static_assert(std::is_arithmetic<T>::value, "ÊäÈëÖµ±ØĞëÊÇÊıÖµÀàĞÍ");
+    static_assert(std::is_arithmetic<T>::value, "è¾“å…¥å€¼å¿…é¡»æ˜¯æ•°å€¼ç±»å‹");
 
     if (upperBound == lowerBound) {
-        throw std::invalid_argument("ÉÏÏŞºÍÏÂÏŞ²»ÄÜÏàÍ¬");
+        throw std::invalid_argument("ä¸Šé™å’Œä¸‹é™ä¸èƒ½ç›¸åŒ");
     }
 
-    // ¼ÆËã±ÈÀıÒò×Ó
+    // è®¡ç®—æ¯”ä¾‹å› å­
     double scaleFactor = (upperBound - lowerBound) / 2.0;
 
-    // ¼ÆËã×ª»»ºóµÄÖµ
+    // è®¡ç®—è½¬æ¢åçš„å€¼
     double result = lowerBound + (value * scaleFactor);
 
-    // ±£ÁôÖÁÉÙÁ½Î»Ğ¡Êı
+    // ä¿ç•™è‡³å°‘ä¸¤ä½å°æ•°
     return std::floor(result * 100.0) / 100.0;
 }
 
@@ -53,7 +53,7 @@ double convertValueWithBounds(T value, double lowerBound, double upperBound) {
 
 
 
-
+ 
 
 
 

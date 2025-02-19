@@ -130,8 +130,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="CAN_frame.hpp" />
     <ClInclude Include="CLASS_Motor.hpp" />
     <ClInclude Include="Data_processing.hpp" />
+    <ClInclude Include="PDO_config.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

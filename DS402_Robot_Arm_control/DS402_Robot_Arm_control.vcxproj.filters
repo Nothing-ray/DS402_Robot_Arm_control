@@ -14,4 +14,18 @@
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="CLASS_Motor.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Data_processing.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CAN_frame.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PDO_config.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>
