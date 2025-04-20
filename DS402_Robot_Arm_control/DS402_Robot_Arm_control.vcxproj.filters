@@ -27,5 +27,8 @@
     <ClInclude Include="PDO_config.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="AtomicRawData.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

@@ -6,6 +6,84 @@
 #include <string>
 #include <cmath>
 #include <mutex>
+#include <atomic>
+
+
+
+/*
+**
+* @brief 硬件对齐的原始数据存储结构体模板
+* @tparam N 数据位宽（仅允许2 / 4 / 8字节）
+*
+*@warning 每个实例必须单独占用完整缓存行，不得连续声明未填充的结构体数组
+*/
+template <size_t N>
+struct AlignedRawData {
+    // 静态断言确保只支持关键位宽
+    static_assert(N == 2 || N == 4 || N == 8,
+        "Only support 2/4/8 bytes width");
+    // 匿名联合体实现类型双关（Type Punning）
+    union {
+        volatile uint8_t bytes_[N];  ///< 原始字节视图（适用于DMA/协议栈）
+        std::conditional_t<N == 2, int16_t,
+            std::conditional_t<N == 4, int32_t,
+            int64_t>> value_;        ///< 有符号整型视图（业务逻辑使用）
+    };
+    /// 显式填充保证独占完整缓存行（ARM64为64字节）
+    uint8_t padding_[64 - N];
+    // ========================= 原子操作接口 ========================= //
+    /**
+     * @brief 原子写入数据（Release语义）
+     * @tparam T 数据类型（自动推导位宽）
+     * @param buf 输入数据指针
+     *
+     * @note 典型场景:
+     * - CAN报文接收线程调用
+     * - DMA传输完成中断中调用
+     *
+     * @code
+     * uint16_t val = 0x1234;
+     * can_data.atomicWrite(&val); // 2字节写入
+     * @endcode
+     */
+    template <typename T>
+    void atomicWrite(const T* buf) volatile noexcept {
+        static_assert(sizeof(T) == N, "Type size mismatch");
+        __atomic_store_n(&value_,
+            *reinterpret_cast<const decltype(value_)*>(buf),
+            __ATOMIC_RELEASE);
+    }
+    /**
+     * @brief 原子读取数据（Acquire语义）
+     * @tparam T 数据类型（必须与实例位宽匹配）
+     * @param[out] buf 输出缓冲区指针
+     *
+     * @note 内存序保证:
+     * - 确保读取前所有先前的写入操作对当前线程可见
+     * - 适合用于控制循环中的状态读取
+     */
+    template <typename T>
+    void atomicRead(T* buf) const volatile noexcept {
+        static_assert(sizeof(T) == N, "Type size mismatch");
+        *reinterpret_cast<decltype(value_)*>(buf) =
+            __atomic_load_n(&value_, __ATOMIC_ACQUIRE);
+    }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /**
  * @brief DS402 协议下常用对象字典地址示例（仅供参考）
@@ -17,8 +95,8 @@ static constexpr uint16_t OD_MODES_OF_OPERATION = 0x6060;  /// 运行模式(写)
 static constexpr uint16_t OD_MODES_OF_DISPLAY = 0x6061;  /// 运行模式(读)<<< 0x6061
 static constexpr uint16_t OD_ERROR_CODE = 0x603F;  /// 错误码<<< 0x603F
 
-static constexpr uint16_t OD_TARGET_CURRENT = 0x6071;  /// 目标电流>>> 0x6071
-static constexpr uint16_t OD_ACTUAL_CURRENT = 0x6078;  /// 实际电流<<< 0x6078
+static constexpr uint16_t OD_TARGET_CURRENT = 0x6071;   /// 目标电流>>> 0x6071
+static constexpr uint16_t OD_ACTUAL_CURRENT = 0x6078;   /// 实际电流<<< 0x6078
 static constexpr uint16_t OD_TARGET_POSITION = 0x607A;  /// 目标位置>>> 0x607A
 static constexpr uint16_t OD_ACTUAL_POSITION = 0x6064;  /// 实际位置<<< 0x6064
 static constexpr uint16_t OD_TARGET_VELOCITY = 0x60FF;  /// 目标速度>>> 0x60FF
@@ -54,14 +132,18 @@ struct StateAndMode
 {
     //原子类型布尔变量，确保读写的时候不会出现多线程同步问题
     // true 已刷新 false 未刷新
-    std::atomic<bool> refresh = true;
+    alignas(64) std::atomic<bool> refresh = true; // 独占缓存行
 
     // DS402: 控制字(0x6040)、状态字(0x6041)通常各2字节
     // 运行模式(0x6060)通常1字节，错误码(0x603F)通常2字节
-    volatile uint8_t controlWordRaw[2];       /// 控制字（原始2字节）>>
-    volatile uint8_t statusWordRaw[2];        /// 状态字（原始2字节）<<
-    volatile uint8_t modeOfOperationRaw[1];   /// 运行模式（原始1字节）>>
-    volatile uint8_t errorCodeRaw[2];         /// 电机错误代码（原始2字节）<<
+    volatile struct {
+        uint8_t controlWordRaw[2];     /// 控制字（原始2字节）>>
+        uint8_t statusWordRaw[2];      /// 状态字（原始2字节）<<
+    };
+    volatile struct {
+        uint8_t modeOfOperationRaw[1]; /// 运行模式（原始1字节）>>
+        uint8_t errorCodeRaw[2];       /// 电机错误代码（原始2字节）<<
+    };
 
     const uint16_t controlWordIndex = OD_CONTROL_WORD;      // 0x6040
     const uint16_t statusWordIndex = OD_STATUS_WORD;       // 0x6041
@@ -69,120 +151,312 @@ struct StateAndMode
     const uint16_t errorCodeIndex = OD_ERROR_CODE;        // 0x603F
 };
 
-/**
- * @brief 电流结构体 (MotorCurrent)
- * @brief MotorCurrent::send_refresh    发送数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorCurrent::receive_refresh 接收数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorCurrent::actual_CurrentRaw  实际电流原始2字节 (S16)
- * @brief MotorCurrent::target_CurrentRaw  目标电流原始2字节 (S16)
- * @brief MotorCurrent::actual_Current_Encoder  实际电流换算后编码器值
- * @brief MotorCurrent::target_Current_Encoder  目标电流换算后编码器值
- * @brief MotorCurrent::actual_Current     实际电流(浮点)
- * @brief MotorCurrent::target_Current     目标电流(浮点)
- */
-struct MotorCurrent
-{
-    // true 已刷新 false 未刷新 更改完变量以后记得刷新
-    std::atomic<bool> send_refresh = true;    //发送数据的间接变量的刷新
-    std::atomic<bool> receive_refresh = true; //接收数据的间接变量的刷新 
-
-    // 原始实际电流；S16(2字节)<<
-    volatile uint8_t actual_CurrentRaw[2];
-    // 原始目标电流；S16(2字节)>>
-    volatile uint8_t target_CurrentRaw[2];
-
-    // 原始实际电流经过换算后的编码器的值 刷新
-    int32_t actual_Current_Encoder = 0;
-    // 原始目标电流经过换算后的编码器的值 刷新
-    int32_t target_Current_Encoder = 0;
-
-    // 实际电流（换算后）  刷新
-    float actual_Current = 0.0f;
-    // 目标电流（换算后）  刷新
-    float target_Current = 0.0f;
-
-    const uint16_t actual_Current_Index = OD_ACTUAL_CURRENT;
-    const uint16_t target_Current_Index = OD_TARGET_CURRENT;
-};
 
 /**
- * @brief 位置结构体 (MotorPosition)
- * @brief MotorPosition::send_refresh    发送数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorPosition::receive_refresh 接收数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorPosition::actualPositionRaw  实际位置原始4字节 (S32)
- * @brief MotorPosition::targetPositionRaw  目标位置原始4字节 (S32)
- * @brief MotorPosition::actual_PositionDeg  实际位置换算后角度
- * @brief MotorPosition::target_PositionDeg  目标位置换算后角度
- * @brief MotorPosition::actual_PositionCnt  实际位置编码器计数
- * @brief MotorPosition::target_PositionCnt  目标位置编码器计数
+ * @brief 电机电流 (MotorCurrent)
+ * @brief 采用原子操作和缓存行对齐优化，确保多线程安全访问
+ * @details 实现特性：
+ * 1. 基于位掩码的标志位系统，支持8种独立刷新状态标记
+ * 2. 原始数据与转换值分离存储，避免缓存行伪共享
+ * 3. 严格的64字节对齐，适配现代CPU缓存架构
+ *
+ * @brief MotorCurrent::flags_                标志位控制字(原子操作)
+ * @brief MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH        原始发送数据（十六进制）需要刷新
+ * @brief MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH     原始接收数据（十六进制）需要刷新
+ * @brief MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH    编码器发送数据（十进制）需要刷新
+ * @brief MotorCurrent::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH 编码器接收数据（十进制）需要刷新  
+ * @brief MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH     目标发送数据（十进制）需要刷新
+ * @brief MotorCurrent::Flags::ACTUAL_DATA_RECEIVE_NEED_REFRESH  实际接收数据（十进制）需要刷新      
+ *
+ * @brief MotorCurrent::raw_actual            实际电流原始数据区(带填充对齐)
+ * @brief MotorCurrent::raw_actual.bytes      原始字节形式访问(volatile uint8_t[2])
+ * @brief MotorCurrent::raw_actual.value      整型形式访问(int16_t)
+ *
+ * @brief MotorCurrent::raw_target            目标电流原始数据区(带填充对齐)
+ * @brief MotorCurrent::raw_target.bytes      原始字节形式访问(volatile uint8_t[2])
+ * @brief MotorCurrent::raw_target.value      整型形式访问(int16_t)
+ *
+ * @brief MotorCurrent::actual_encoder        实际电流编码器计数值(原子int32_t)  // 修正实际值组注释为独立成员
+ * @brief MotorCurrent::actual_current        实际物理电流值(原子float)
+ * @brief MotorCurrent::target_encoder        目标电流编码器计数值(原子int32_t)  // 修正目标值组注释为独立成员
+ * @brief MotorCurrent::target_current        目标物理电流值(原子float)
+ *
+ * @brief MotorCurrent::actual_Current_Index  实际电流对象字典索引(只读)
+ * @brief MotorCurrent::target_Current_Index  目标电流对象字典索引(只读)
  */
-struct MotorPosition
-{
-    // true 已刷新 false 未刷新 更改完变量以后记得刷新
-    std::atomic<bool> send_refresh = true;    //发送数据的间接变量的刷新
-    std::atomic<bool> receive_refresh = true; //接收数据的间接变量的刷新
+struct MotorCurrent {
+    /**
+     * @brief 标志位控制枚举
+     * @note 使用单字节存储，最高支持8种状态标志
+     * @warning 修改枚举值需同步更新位操作逻辑
+     */
+    enum Flags : uint8_t {
+        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
 
-    volatile uint8_t actualPositionRaw[4]; //实际位置的原始数据>> 
-    volatile uint8_t targetPositionRaw[4]; //目标位置的原始数据<< 
+        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
 
-    float actual_PositionDeg = 0.0f;  /// 实际值(角度)
-    float target_PositionDeg = 0.0f;  /// 目标值(角度)
+        TARGET_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: 目标发送数据（十进制）需要刷新
+        ACTUAL_DATA_SEND_NEED_REFRESH = 0x20,  ///< 位5: 实际接收数据（十进制）需要刷新
 
-    int32_t actual_PositionCnt = 0;  //实际位置的编码器值
-    int32_t target_PositionCnt = 0;
+        // 保留位
+        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
+        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
 
-    const uint16_t actual_Position_Index = OD_ACTUAL_POSITION; // 0x6064
-    const uint16_t target_Position_Index = OD_TARGET_POSITION; // 0x607A
+        
+    };
+    alignas(64) std::atomic<uint8_t> flags_{ 0 };
+
+    // 原始数据区（带缓存行填充）
+
+    AlignedRawData<2> raw_actual;///< 实际电流原始数据
+    AlignedRawData<2> raw_target;///< 实际电流原始数据
+
+    // 转换值组（独立缓存行）
+    /** @brief 实际电流转换结果组 */
+        alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 编码器计数表示值
+        alignas(64) std::atomic<float> actual_current{ 0.0f }; ///< 物理电流值(安培)
+
+    /** @brief 目标电流转换结果组 */
+        alignas(64) std::atomic<int32_t> target_encoder{ 0 };  ///< 编码器计数表示值
+        alignas(64) std::atomic<float> target_current{ 0.0f }; ///< 物理电流值(安培)
+    
+
+    // 协议常量（请保持硬编码）
+    const uint16_t actual_Current_Index = OD_ACTUAL_CURRENT;  ///< 实际电流对象字典索引
+    const uint16_t target_Current_Index = OD_TARGET_CURRENT;  ///< 目标电流对象字典索引
+
+    /**
+     * @brief 检查待处理的数据类型
+     * @param f 标志位掩码
+     * @return 是否存在待处理更新
+     * @note 使用memory_order_acquire保证最新状态
+     */
+    bool needsProcess(Flags f) const noexcept {
+        return flags_.load(std::memory_order_acquire) & f;
+    }
+    /**
+     * @brief 标记数据处理完成
+     * @param f 要清除的标志位
+     * @note 使用memory_order_release保证操作可见性
+     */
+    void markProcessed(Flags f) noexcept {
+        flags_.fetch_and(~f, std::memory_order_release);
+    }
 };
+
 
 /**
- * @brief 速度结构体 (MotorVelocity)
- * @brief MotorVelocity::send_refresh    发送数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorVelocity::receive_refresh 接收数据刷新 (true:已刷新 false:未刷新)
- * @brief MotorVelocity::actualVelocityRaw  实际速度原始4字节 (S32)
- * @brief MotorVelocity::targetVelocityRaw  目标速度原始4字节 (S32)
- * @brief MotorVelocity::actualVelocityRPM   实际速度(rpm)
- * @brief MotorVelocity::targetVelocityRPM   目标速度(rpm)
- * @brief MotorVelocity::actualVelocityCnt   实际速度的编码器值
- * @brief MotorVelocity::targetVelocityCnt   目标速度的编码器值
+ * @brief 电机位置 (MotorPosition)
+ * @brief 采用原子操作和缓存行对齐优化，确保多线程安全访问
+ * @details 实现特性：
+ * 1. 基于位掩码的标志位系统，支持8种独立刷新状态标记
+ * 2. 原始数据与转换值分离存储，避免缓存行伪共享
+ * 3. 严格的64字节对齐，适配现代CPU缓存架构
+ *
+ * @brief MotorPosition::flags_                标志位控制字(原子操作)
+ * @brief MotorPosition::Flags::RAW_DATA_SEND_NEED_REFRESH        原始发送数据（十六进制）需要刷新
+ * @brief MotorPosition::Flags::RAW_DATA_RECEIVE_NEED_REFRESH     原始接收数据（十六进制）需要刷新
+ * @brief MotorPosition::Flags::ENCODER_DATA_SEND_NEED_REFRESH    编码器发送数据（十进制）需要刷新
+ * @brief MotorPosition::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH 编码器接收数据（十进制）需要刷新
+ * @brief MotorPosition::Flags::DEGREE_DATA_SEND_NEED_REFRESH     角度值发送数据（浮点）需要刷新
+ * @brief MotorPosition::Flags::DEGREE_DATA_RECEIVE_NEED_REFRESH  角度值接收数据（浮点）需要刷新
+ *
+ * @brief MotorPosition::raw_actual            实际位置原始数据区(带填充对齐)
+ * @brief MotorPosition::raw_actual.bytes      原始字节形式访问(volatile uint8_t[4])
+ * @brief MotorPosition::raw_actual.value      整型形式访问(int32_t)
+ *
+ * @brief MotorPosition::raw_target            目标位置原始数据区(带填充对齐)
+ * @brief MotorPosition::raw_target.bytes      原始字节形式访问(volatile uint8_t[4])
+ * @brief MotorPosition::raw_target.value      整型形式访问(int32_t)
+ *
+ * @brief MotorPosition::actual_encoder        实际位置编码器计数值(原子int32_t)
+ * @brief MotorPosition::actual_degree         实际角度值(原子float)
+ * @brief MotorPosition::target_encoder        目标位置编码器计数值(原子int32_t)
+ * @brief MotorPosition::target_degree         目标角度值(原子float)
+ *
+ * @brief MotorPosition::actual_Position_Index  实际位置对象字典索引(只读)
+ * @brief MotorPosition::target_Position_Index  目标位置对象字典索引(只读)
  */
-struct MotorVelocity
-{
-    // true 已刷新 false 未刷新 更改完变量以后记得刷新
-    std::atomic<bool> send_refresh = true;    //发送数据的间接变量的刷新
-    std::atomic<bool> receive_refresh = true; //接收数据的间接变量的刷新
+struct MotorPosition {
+    /**
+     * @brief 标志位控制枚举
+     * @note 使用单字节存储，最高支持8种状态标志
+     * @warning 修改枚举值需同步更新位操作逻辑
+     */
+    enum Flags : uint8_t {
+        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
 
-    volatile uint8_t actualVelocityRaw[4];//实际的
-    volatile uint8_t targetVelocityRaw[4];
+        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
 
-    float actualVelocityRPM = 0.0f; ///< 实际速度 (rpm)
-    float targetVelocityRPM = 0.0f; ///< 目标速度 (rpm)
+        DEGREE_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: 角度值发送数据（浮点）需要刷新
+        DEGREE_DATA_RECEIVE_NEED_REFRESH = 0x20,  ///< 位5: 角度值接收数据（浮点）需要刷新
 
-    int32_t actualVelocityCnt = 0;    // 编码器实际速度值
-    int32_t targetVelocityCnt = 0;    // 编码器目标速度值
+        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
+        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
+    };
+    alignas(64) std::atomic<uint8_t> flags_{ 0 };
 
-    const uint16_t actualVelocityIndex = OD_ACTUAL_VELOCITY; //0x606C
-    const uint16_t targetVelocityIndex = OD_TARGET_VELOCITY; //0x60FF
+    // 原始数据区（带缓存行填充）
+    AlignedRawData<4> raw_actual;  ///< 实际位置原始数据
+    AlignedRawData<4> raw_target;  ///< 目标位置原始数据
+
+    // 转换值组（独立缓存行）
+    alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
+    alignas(64) std::atomic<float> actual_degree{ 0.0f };  ///< 实际角度值(度)
+    alignas(64) std::atomic<int32_t> target_encoder{ 0 };  ///< 目标编码器计数值
+    alignas(64) std::atomic<float> target_degree{ 0.0f };  ///< 目标角度值(度)
+
+    // 协议常量（DS402标准）
+    const uint16_t actual_Position_Index = OD_ACTUAL_POSITION;  ///< 0x6064
+    const uint16_t target_Position_Index = OD_TARGET_POSITION;  ///< 0x607A
+
+    /**
+     * @brief 检查待处理的数据类型
+     * @param f 标志位掩码
+     * @return 是否存在待处理更新
+     * @note 使用memory_order_acquire保证最新状态
+     */
+    bool needsProcess(Flags f) const noexcept {
+        return flags_.load(std::memory_order_acquire) & f;
+    }
+
+    /**
+     * @brief 标记数据处理完成
+     * @param f 要清除的标志位
+     * @note 使用memory_order_release保证操作可见性
+     */
+    void markProcessed(Flags f) noexcept {
+        flags_.fetch_and(~f, std::memory_order_release);
+    }
 };
+
+
+
+
 
 /**
- * @brief 加减速度结构体 (MotorAccelDecel)
- * @brief MotorAccelDecel::accelRaw  加速度原始4字节 (U32)
- * @brief MotorAccelDecel::decelRaw  减速度原始4字节 (U32)
- * @brief MotorAccelDecel::accelValue  解析后的加速度数值
- * @brief MotorAccelDecel::decelValue  解析后的减速度数值
+ * @brief 电机速度 (MotorVelocity)
+ * @brief 采用原子操作和缓存行对齐优化，确保多线程安全访问
+ * @details 实现特性：
+ * 1. 基于位掩码的标志位系统，支持8种独立刷新状态标记
+ * 2. 原始数据与转换值分离存储，避免缓存行伪共享
+ * 3. 严格的64字节对齐，适配现代CPU缓存架构
+ *
+ * @brief MotorVelocity::flags_                标志位控制字(原子操作)
+ * @brief MotorVelocity::Flags::RAW_DATA_SEND_NEED_REFRESH        原始发送数据（十六进制）需要刷新
+ * @brief MotorVelocity::Flags::RAW_DATA_RECEIVE_NEED_REFRESH     原始接收数据（十六进制）需要刷新
+ * @brief MotorVelocity::Flags::ENCODER_DATA_SEND_NEED_REFRESH    编码器发送数据（十进制）需要刷新
+ * @brief MotorVelocity::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH 编码器接收数据（十进制）需要刷新
+ * @brief MotorVelocity::Flags::RPM_DATA_SEND_NEED_REFRESH        RPM值发送数据（浮点）需要刷新
+ * @brief MotorVelocity::Flags::RPM_DATA_RECEIVE_NEED_REFRESH     RPM值接收数据（浮点）需要刷新
+ *
+ * @brief MotorVelocity::raw_actual            实际速度原始数据区(带填充对齐)
+ * @brief MotorVelocity::raw_actual.bytes      原始字节形式访问(volatile uint8_t[4])
+ * @brief MotorVelocity::raw_actual.value      整型形式访问(int32_t)
+ *
+ * @brief MotorVelocity::raw_target            目标速度原始数据区(带填充对齐)
+ * @brief MotorVelocity::raw_target.bytes      原始字节形式访问(volatile uint8_t[4])
+ * @brief MotorVelocity::raw_target.value      整型形式访问(int32_t)
+ *
+ * @brief MotorVelocity::actual_encoder        实际速度编码器计数值(原子int32_t)
+ * @brief MotorVelocity::actual_rpm            实际转速值(原子float)
+ * @brief MotorVelocity::target_encoder        目标速度编码器计数值(原子int32_t)
+ * @brief MotorVelocity::target_rpm            目标转速值(原子float)
+ *
+ * @brief MotorVelocity::actual_Velocity_Index  实际速度对象字典索引(只读)
+ * @brief MotorVelocity::target_Velocity_Index  目标速度对象字典索引(只读)
  */
-struct MotorAccelDecel
-{
-    volatile uint8_t accelRaw[4];
-    volatile uint8_t decelRaw[4];
+struct MotorVelocity {
+    /**
+     * @brief 标志位控制枚举
+     * @note 使用单字节存储，最高支持8种状态标志
+     * @warning 修改枚举值需同步更新位操作逻辑
+     */
+    enum Flags : uint8_t {
+        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
 
-    uint32_t accelValue = 0;
-    uint32_t decelValue = 0;
+        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
 
-    const uint16_t accelIndex = OD_ACCELERATION; //0x6083
-    const uint16_t decelIndex = OD_DECELERATION; //0x6084
+        RPM_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: RPM值发送数据（浮点）需要刷新
+        RPM_DATA_RECEIVE_NEED_REFRESH = 0x20,  ///< 位5: RPM值接收数据（浮点）需要刷新
+
+        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
+        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
+    };
+    alignas(64) std::atomic<uint8_t> flags_{ 0 };
+
+    // 原始数据区（带缓存行填充）
+    AlignedRawData<4> raw_actual;  ///< 实际速度原始数据
+    AlignedRawData<4> raw_target;  ///< 目标速度原始数据
+
+    // 转换值组（独立缓存行）
+    alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
+    alignas(64) std::atomic<float> actual_rpm{ 0.0f };     ///< 实际转速值(RPM)
+    alignas(64) std::atomic<int32_t> target_encoder{ 0 };  ///< 目标编码器计数值
+    alignas(64) std::atomic<float> target_rpm{ 0.0f };     ///< 目标转速值(RPM)
+
+    // 协议常量（DS402标准）
+    const uint16_t actual_Velocity_Index = OD_ACTUAL_VELOCITY;  ///< 0x606C
+    const uint16_t target_Velocity_Index = OD_TARGET_VELOCITY;  ///< 0x60FF
+
+    /**
+     * @brief 检查待处理的数据类型
+     * @param f 标志位掩码
+     * @return 是否存在待处理更新
+     * @note 使用memory_order_acquire保证最新状态
+     */
+    bool needsProcess(Flags f) const noexcept {
+        return flags_.load(std::memory_order_acquire) & f;
+    }
+
+    /**
+     * @brief 标记数据处理完成
+     * @param f 要清除的标志位
+     * @note 使用memory_order_release保证操作可见性
+     */
+    void markProcessed(Flags f) noexcept {
+        flags_.fetch_and(~f, std::memory_order_release);
+    }
 };
+
+
+
+/**
+ * @brief 电机加减速(MotorAccelDecel)
+ * @brief 适配DS402协议0x6083(加速度)/0x6084(减速度)
+ * @details 核心特性：
+ * 1. 直接使用AlignedRawData<4>存储原始值
+ * 2. 数值直接映射为工程值(单位：转/秒²)
+ * 3. 自动继承原子操作接口
+ *
+ * @warning 该结构体不包含状态标志位
+ *
+ * @brief MotorAccelDecel::raw_accel  加速度原始数据区
+ * @brief MotorAccelDecel::raw_accel.bytes_  原始字节访问接口
+ * @brief MotorAccelDecel::raw_accel.value_  整型值访问接口
+ *
+ * @brief MotorAccelDecel::raw_decel  减速度原始数据区
+ * @brief MotorAccelDecel::raw_decel.bytes_  原始字节访问接口
+ * @brief MotorAccelDecel::raw_decel.value_  整型值访问接口
+ */
+struct MotorAccelDecel {
+    // 数据存储区（复用模板）
+    AlignedRawData<4> raw_accel;  ///< 加速度值(单位r/s²)
+    AlignedRawData<4> raw_decel;  ///< 减速度值(单位r/s²)
+
+    // 协议常量（DS402标准）
+    const uint16_t accel_Index = OD_ACCELERATION;  ///< 0x6083
+    const uint16_t decel_Index = OD_DECELERATION;  ///< 0x6084
+
+};
+
+
 
 
 
@@ -350,8 +624,8 @@ public:
     }
 
 public:
-    
-    
+
+
     StateAndMode    stateAndMode;  //状态和模式结构体
     MotorCurrent    current;       //电流结构体
     MotorPosition   position;      //位置结构体
