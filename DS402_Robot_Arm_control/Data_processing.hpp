@@ -20,35 +20,57 @@
 
 */
 
-
-
+#define SENSOR_RANGE 32768   //传感器的范围
 
 
 /**
- * @brief 将输入值转换为目标范围的值，并返回至少两位小数的结果
- * @tparam T 输入值类型（可以是整数或浮点数）
+ * @brief 编码器值与角度值的双向转换函数
+ *
  * @param value 输入值
- * @param lowerBound 下限
- * @param upperBound 上限
- * @return double 类型的转换后值，至少保留两位小数
+ * @param sensorRange 编码器量程（默认32768）
+ * @param toAngle true表示编码器→角度，false表示角度→编码器
+ * @param decimalPlaces 保留小数位数（默认2位，仅toAngle=true有效）
+ * @param round 是否四舍五入（默认true）
+ * @return double 转换结果
+ *
+ * @note 角度→编码器转换时，返回值会截断为整数
+ * @warning 角度输入超过360度时会自动取模
  */
-template <typename T>
-double convertValueWithBounds(T value, double lowerBound, double upperBound) {
-    static_assert(std::is_arithmetic<T>::value, "输入值必须是数值类型");
+inline double convertSensorAngle(
+    double value,
+    bool toAngle = true,
+    int32_t sensorRange = SENSOR_RANGE,
+    int decimalPlaces = 2,
+    bool round = true
+) {
+    const double scale = 360.0 / sensorRange;
 
-    if (upperBound == lowerBound) {
-        throw std::invalid_argument("上限和下限不能相同");
+    if (toAngle) {
+        // 编码器→角度转换
+        double result = value * scale;
+
+        if (decimalPlaces >= 0) {
+            const double factor = std::pow(10.0, decimalPlaces);
+            return round ?
+                std::round(result * factor) / factor :
+                std::floor(result * factor) / factor;
+        }
+        return result;
     }
+    else {
+        // 角度→编码器转换
+        double normalizedAngle = std::fmod(value, 360.0);
+        if (normalizedAngle < 0) normalizedAngle += 360.0;
 
-    // 计算比例因子
-    double scaleFactor = (upperBound - lowerBound) / 2.0;
-
-    // 计算转换后的值
-    double result = lowerBound + (value * scaleFactor);
-
-    // 保留至少两位小数
-    return std::floor(result * 100.0) / 100.0;
+        double sensorValue = normalizedAngle / scale;
+        return round ?
+            std::round(sensorValue) :
+            std::floor(sensorValue);
+    }
 }
+
+
+
 
 
 
@@ -60,46 +82,59 @@ double convertValueWithBounds(T value, double lowerBound, double upperBound) {
  */
 
 
-
-
-
  /**
-  * @brief 通用数据转换模板类
-  * @tparam T 目标类型（必须为整型）
+  * @brief 从字节数组读取整数值
+  * @tparam T 目标整数类型
+  * @param bytes 字节数组指针
+  * @param[out] value 输出结果
+  * @param big_endian 是否使用大端序(默认小端)
+  *
+  * @note 适用于所有标准整数类型(uint8_t,int16_t等)
+  * @warning 需确保bytes缓冲区足够大(sizeof(T))
   */
-template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
-class DataConverter {
-public:
-    // 将原始字节数组转换为目标类型（考虑字节序）
-    static T bytesToValue(const uint8_t* bytes, bool big_endian = true) {
-        T value = 0;
-        if (big_endian) {
-            for (size_t i = 0; i < sizeof(T); ++i) {
-                value |= static_cast<T>(bytes[i]) << (8 * (sizeof(T) - 1 - i));
-            }
-        }
-        else {
-            for (size_t i = 0; i < sizeof(T); ++i) {
-                value |= static_cast<T>(bytes[i]) << (8 * i);
-            }
-        }
-        return value;
+template <typename T>
+inline void bytesToValue(const uint8_t* bytes, T& value, bool big_endian = false)
+{
+    static_assert(std::is_integral_v<T>, "Target type must be integral");
+
+    value = 0; // 初始化输出值
+
+    // 按字节处理，根据字节序调整位移量
+    for (size_t i = 0; i < sizeof(T); ++i)
+    {
+        const size_t shift = big_endian ?
+            8 * (sizeof(T) - 1 - i) : // 大端序：高位在前
+            8 * i;                   // 小端序：低位在前
+
+        value |= static_cast<T>(bytes[i]) << shift;
     }
-     
-    // 将目标类型转回字节数组（默认小端格式）
-    static void valueToBytes(T value, uint8_t* output, bool big_endian = true) {
-        if (big_endian) {
-            for (size_t i = 0; i < sizeof(T); ++i) {
-                output[i] = static_cast<uint8_t>((value >> (8 * (sizeof(T) - 1 - i))) & 0xFF);
-            }
-        }
-        else {
-            for (size_t i = 0; i < sizeof(T); ++i) {
-                output[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
-            }
-        }
+}
+
+/**
+ * @brief 将整数值写入字节数组
+ * @tparam T 源整数类型
+ * @param value 输入值
+ * @param[out] bytes 输出缓冲区
+ * @param big_endian 是否使用大端序(默认小端)
+ *
+ * @note 会自动截断超出字节范围的高位数据
+ */
+template <typename T>
+inline void valueToBytes(T value, uint8_t* bytes, bool big_endian = false)
+{
+    static_assert(std::is_integral_v<T>, "Source type must be integral");
+
+    // 逐个字节提取并存储
+    for (size_t i = 0; i < sizeof(T); ++i)
+    {
+        const size_t shift = big_endian ?
+            8 * (sizeof(T) - 1 - i) : // 大端序：高位在前
+            8 * i;                   // 小端序：低位在前
+
+        bytes[i] = static_cast<uint8_t>((value >> shift) & 0xFF);
     }
-};
+}
+
 
 /**
  * @brief 电流转换特化（q15格式）
@@ -120,8 +155,6 @@ public:
     }
 };
 
-/**
- * @brief
 
 
 

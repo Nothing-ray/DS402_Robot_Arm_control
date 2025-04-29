@@ -132,7 +132,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="AtomicRawData.hpp" />
     <ClInclude Include="CAN_frame.hpp" />
     <ClInclude Include="CLASS_Motor.hpp" />
     <ClInclude Include="Data_processing.hpp" />

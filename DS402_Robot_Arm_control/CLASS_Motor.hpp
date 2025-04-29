@@ -10,72 +10,122 @@
 
 
 
-/*
-**
-* @brief 硬件对齐的原始数据存储结构体模板
-* @tparam N 数据位宽（仅允许2 / 4 / 8字节）
-*
-*@warning 每个实例必须单独占用完整缓存行，不得连续声明未填充的结构体数组
-*/
-template <size_t N>
-struct AlignedRawData {
-    // 静态断言确保只支持关键位宽
-    static_assert(N == 2 || N == 4 || N == 8,
-        "Only support 2/4/8 bytes width");
-    // 匿名联合体实现类型双关（Type Punning）
+/**
+ * @brief 硬件缓存行对齐的原子化数据存储结构体模板
+ * @tparam N 数据位宽（支持1/2/4/8字节）
+ * @tparam T 可选用户指定类型（默认void自动推断）
+ *
+ * @details 本模板提供：
+ * 1. 保证64字节缓存行对齐（ARM64/X86优化）
+ * 2. 类型双关(Type Punning)安全实现
+ * 3. 跨平台原子操作封装
+ * 4. 多线程安全访问保障
+ *
+ * @warning 特殊使用限制：
+ * - 禁止复制构造/赋值（拷贝需通过原子接口）
+ * - 实例必须独占缓存行（不可定义未填充的数组）
+ * - 用户指定类型T必须是平凡可复制(trivially copyable)类型
+ *
+ * @note 典型应用场景：
+ * - CANopen协议PDO映射数据区
+ * - 多核共享的电机控制参数
+ * - 高频更新的传感器数据
+ */
+template <size_t N, typename T = void>
+struct alignas(64) AlignedRawData {
+    /* 数据宽度静态检查 */
+    static_assert(N == 1 || N == 2 || N == 4 || N == 8,
+        "Only support 1/2/4/8 bytes width");
+    /* 用户类型安全检查 */
+    static_assert(std::is_void_v<T> ||
+        (sizeof(T) == N && std::is_trivially_copyable_v<T>),
+        "Invalid user-specified type");
+
+    /**
+     * @brief 匿名联合体实现安全类型双关
+     * @details 通过联合体实现两种数据视图：
+     * - 原始字节序列：用于协议栈/DMA直接访问
+     * - 类型化视图：用于业务逻辑操作
+     */
     union {
-        volatile uint8_t bytes_[N];  ///< 原始字节视图（适用于DMA/协议栈）
-        std::conditional_t<N == 2, int16_t,
-            std::conditional_t<N == 4, int32_t,
-            int64_t>> value_;        ///< 有符号整型视图（业务逻辑使用）
+        volatile uint8_t bytes_[N];  ///< 原始字节视图（内存连续，支持memcpy）
+        std::conditional_t<std::is_same_v<T, void>,
+            std::conditional_t<N == 1, int8_t,      ///< N=1默认int8_t
+            std::conditional_t<N == 2, int16_t, ///< N=2默认int16_t
+            std::conditional_t<N == 4, int32_t, ///< N=4默认int32_t
+            int64_t>>>, ///< N=8默认int64_t
+            T> value_;  ///< 用户指定类型视图（需确保sizeof(T)==N）
     };
-    /// 显式填充保证独占完整缓存行（ARM64为64字节）
+
+    /// 缓存行填充（ARM64为64字节）
     uint8_t padding_[64 - N];
-    // ========================= 原子操作接口 ========================= //
+
+    // ====================== 原子操作接口 ====================== //
+
     /**
      * @brief 原子写入数据（Release语义）
-     * @tparam T 数据类型（自动推导位宽）
+     * @tparam U 数据类型（自动推导）
      * @param buf 输入数据指针
      *
-     * @note 典型场景:
-     * - CAN报文接收线程调用
-     * - DMA传输完成中断中调用
+     * @note 技术特性：
+     * 1. 使用__ATOMIC_RELEASE保证写入可见性
+     * 2. 静态检查类型大小匹配
+     * 3. 严格内存访问（避免strict-aliasing违规）
      *
+     * @warning 必须遵循：
+     * - buf必须是有效指针
+     * - 禁止与非原子操作混用
+     *
+     * @example 写入uint32_t值：
      * @code
-     * uint16_t val = 0x1234;
-     * can_data.atomicWrite(&val); // 2字节写入
+     * uint32_t val = 0x12345678;
+     * data.atomicWrite(&val);
      * @endcode
      */
-    template <typename T>
-    void atomicWrite(const T* buf) volatile noexcept {
-        static_assert(sizeof(T) == N, "Type size mismatch");
+    template <typename U>
+    void atomicWrite(const U* buf) volatile noexcept {
+        static_assert(sizeof(U) == N, "Type size mismatch");
+        static_assert(std::is_trivially_copyable_v<U>,
+            "Type must be trivially copyable");
         __atomic_store_n(&value_,
-            *reinterpret_cast<const decltype(value_)*>(buf),
+            *static_cast<const decltype(value_)*>(static_cast<const void*>(buf)),
             __ATOMIC_RELEASE);
     }
+
     /**
      * @brief 原子读取数据（Acquire语义）
-     * @tparam T 数据类型（必须与实例位宽匹配）
+     * @tparam U 目标数据类型
      * @param[out] buf 输出缓冲区指针
      *
-     * @note 内存序保证:
-     * - 确保读取前所有先前的写入操作对当前线程可见
-     * - 适合用于控制循环中的状态读取
+     * @note 内存序保证：
+     * - 确保读取前的所有写入操作对当前线程可见
+     * - 适合状态机等需要强一致性的场景
+     *
+     * @warning 缓冲区必须预先分配
+     *
+     * @example 读取到int32_t变量：
+     * @code
+     * int32_t result;
+     * data.atomicRead(&result);
+     * @endcode
      */
-    template <typename T>
-    void atomicRead(T* buf) const volatile noexcept {
-        static_assert(sizeof(T) == N, "Type size mismatch");
-        *reinterpret_cast<decltype(value_)*>(buf) =
+    template <typename U>
+    void atomicRead(U* buf) const volatile noexcept {
+        static_assert(sizeof(U) == N, "Type size mismatch");
+        *static_cast<decltype(value_)*>(static_cast<void*>(buf)) =
             __atomic_load_n(&value_, __ATOMIC_ACQUIRE);
     }
+
+    /* 禁用拷贝构造/赋值（保证操作原子性） */
+    AlignedRawData(const AlignedRawData&) = delete;
+    AlignedRawData& operator=(const AlignedRawData&) = delete;
 };
 
-
-
-
-
-
-
+// 编译时校验
+static_assert(sizeof(AlignedRawData<4>) == 64,
+    "Cache line size must be 64 bytes");
+static_assert(alignof(AlignedRawData<4>) >= 64,
+    "Minimum alignment requirement failed");
 
 
 
@@ -210,8 +260,8 @@ struct MotorCurrent {
 
     // 原始数据区（带缓存行填充）
 
-    AlignedRawData<2> raw_actual;///< 实际电流原始数据
-    AlignedRawData<2> raw_target;///< 实际电流原始数据
+    AlignedRawData<2,int16_t> raw_actual;///< 实际电流原始数据
+    AlignedRawData<2,int16_t> raw_target;///< 实际电流原始数据
 
     // 转换值组（独立缓存行）
     /** @brief 实际电流转换结果组 */
@@ -301,8 +351,8 @@ struct MotorPosition {
     alignas(64) std::atomic<uint8_t> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<4> raw_actual;  ///< 实际位置原始数据
-    AlignedRawData<4> raw_target;  ///< 目标位置原始数据
+    AlignedRawData<4,int32_t> raw_actual;  ///< 实际位置原始数据
+    AlignedRawData<4,int32_t> raw_target;  ///< 目标位置原始数据
 
     // 转换值组（独立缓存行）
     alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
@@ -392,8 +442,8 @@ struct MotorVelocity {
     alignas(64) std::atomic<uint8_t> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<4> raw_actual;  ///< 实际速度原始数据
-    AlignedRawData<4> raw_target;  ///< 目标速度原始数据
+    AlignedRawData<2,int16_t> raw_actual;  ///< 实际速度原始数据
+    AlignedRawData<4,int16_t> raw_target;  ///< 目标速度原始数据
 
     // 转换值组（独立缓存行）
     alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
@@ -431,8 +481,8 @@ struct MotorVelocity {
  * @brief 电机加减速(MotorAccelDecel)
  * @brief 适配DS402协议0x6083(加速度)/0x6084(减速度)
  * @details 核心特性：
- * 1. 直接使用AlignedRawData<4>存储原始值
- * 2. 数值直接映射为工程值(单位：转/秒²)
+ * 1. 直接使用AlignedRawData<2>存储原始值
+ * 2. 数值直接映射为工程值(单位：转/分)
  * 3. 自动继承原子操作接口
  *
  * @warning 该结构体不包含状态标志位
@@ -447,8 +497,8 @@ struct MotorVelocity {
  */
 struct MotorAccelDecel {
     // 数据存储区（复用模板）
-    AlignedRawData<4> raw_accel;  ///< 加速度值(单位r/s²)
-    AlignedRawData<4> raw_decel;  ///< 减速度值(单位r/s²)
+    AlignedRawData<2,uint16_t> raw_accel;  ///< 加速度值(单位RPM/min)
+    AlignedRawData<2,uint16_t> raw_decel;  ///< 减速度值(单位RPM/min)
 
     // 协议常量（DS402标准）
     const uint16_t accel_Index = OD_ACCELERATION;  ///< 0x6083
@@ -480,43 +530,40 @@ public:
 
     /**
      * @brief 初始化方法：
-     *  - 暂时不实现，可在此将所有原始数据清零，或将模式置为安全模式等。
+     *  
      */
-    void init()
-    {
-        // 此处根据需求对所有子结构的数据做一次安全初始化
-        // 例如:
-        for (auto& b : stateAndMode.controlWordRaw) { b = 0; }
-        for (auto& b : stateAndMode.statusWordRaw) { b = 0; }
-        for (auto& b : stateAndMode.modeOfOperationRaw) { b = 0; }
-        for (auto& b : stateAndMode.errorCodeRaw) { b = 0; }
+    void init() {
+        //  状态模式初始化
+        stateAndMode.refresh = false;
+        memset(stateAndMode.controlWordRaw, 0, sizeof(stateAndMode.controlWordRaw));
+        memset(stateAndMode.statusWordRaw, 0, sizeof(stateAndMode.statusWordRaw));
+        stateAndMode.modeOfOperationRaw[0] =
+            static_cast<uint8_t>(MotorMode::PROFILE_TORQUE); // 默认选择电流模式，在电流为0的情况下是安全的
 
-        for (auto& b : current.actual_CurrentRaw) { b = 0; }
-        for (auto& b : current.target_CurrentRaw) { b = 0; }
-        current.actual_Current = 0.0f;
-        current.target_Current = 0.0f;
+        // 电流数据初始化
+        current.flags_.store(0);
+        current.raw_actual.atomicWrite<uint16_t>(0);
+        current.raw_target.atomicWrite<uint16_t>(0);
+        current.actual_current.store(0.0f);
+        current.target_current.store(0.0f);
 
-        for (auto& b : position.actualPositionRaw) { b = 0; }
-        for (auto& b : position.targetPositionRaw) { b = 0; }
-        position.actual_PositionDeg = 0.0f;
-        position.target_PositionDeg = 0.0f;
-        position.actual_PositionCnt = 0;
-        position.target_PositionCnt = 0;
+        // 位置数据初始化
+        position.flags_.store(0);
+        position.raw_actual.atomicWrite<int32_t>(0);
+        position.raw_target.atomicWrite<int32_t>(0);
+        position.actual_degree.store(0.0f);
 
-        for (auto& b : velocity.actualVelocityRaw) { b = 0; }
-        for (auto& b : velocity.targetVelocityRaw) { b = 0; }
-        velocity.actualVelocityRPM = 0.0f;
-        velocity.targetVelocityRPM = 0.0f;
-        velocity.actualVelocityCnt = 0;
-        velocity.targetVelocityCnt = 0;
+        // 速度数据初始化
+        velocity.flags_.store(0);
+        velocity.raw_target.atomicWrite<int32_t>(0);
 
-        for (auto& b : accelDecel.accelRaw) { b = 0; }
-        for (auto& b : accelDecel.decelRaw) { b = 0; }
-        accelDecel.accelValue = 0;
-        accelDecel.decelValue = 0;
-
-        // ...
+        // 加减速初始化
+        const uint32_t default_accel = 0; // RPM/min
+        const uint32_t default_decel = 0;
+        accelDecel.raw_accel.atomicWrite<uint32_t>(&default_accel);
+        accelDecel.raw_decel.atomicWrite<uint32_t>(&default_decel);
     }
+
 
     /**
      * @brief 读刷新方法
@@ -528,11 +575,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        // (示例) 将 raw 的控制字/状态字/模式等转换成需要的 int 或枚举：
-        // controlWord = (uint16_t)( (stateAndMode.controlWordRaw[1] << 8) |
-        //                            stateAndMode.controlWordRaw[0] );
-        // ...
-        // modeOfOperation = (MotorMode)(stateAndMode.modeOfOperationRaw[0]);
+     
 
         // 电流
         {
@@ -630,7 +673,7 @@ public:
     MotorCurrent    current;       //电流结构体
     MotorPosition   position;      //位置结构体
     MotorVelocity   velocity;      //速度结构体
-    MotorAccelDecel accelDecel;    //
+    MotorAccelDecel accelDecel;    //加速度结构体
 
 private:
     // 用于 readRefresh / writeRefresh 保护的互斥量
