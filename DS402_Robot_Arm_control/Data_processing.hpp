@@ -81,79 +81,105 @@ inline double convertSensorAngle(
  * @brief 数据转换相关函数集
  */
 
-
  /**
-  * @brief 从字节数组读取整数值
-  * @tparam T 目标整数类型
-  * @param bytes 字节数组指针
-  * @param[out] value 输出结果
-  * @param big_endian 是否使用大端序(默认小端)
+  * @brief 将字节数组转换为指定类型的整数值
+  * @tparam T 目标整数类型（uint8_t/int16_t/uint32_t等）
+  * @param[in] bytes 源字节数组指针（必须至少包含sizeof(T)字节）
+  * @param[out] value 转换结果输出
+  * @param[in] big_endian 是否使用大端字节序（默认小端）
   *
-  * @note 适用于所有标准整数类型(uint8_t,int16_t等)
-  * @warning 需确保bytes缓冲区足够大(sizeof(T))
+  * @note 功能特性：
+  * - 支持8/16/32/64位整型（通过static_assert限制）
+  * - 自动处理字节序转换
+  * - 对16/32位类型使用无分支优化
+  * - 类型安全检查（仅允许整型）
   */
 template <typename T>
 inline void bytesToValue(const uint8_t* bytes, T& value, bool big_endian = false)
 {
+    // 编译期类型检查：目标类型必须是整数且不超过64位
     static_assert(std::is_integral_v<T>, "Target type must be integral");
+    static_assert(sizeof(T) <= 8, "Max 64-bit supported");
 
-    value = 0; // 初始化输出值
+    // 16位类型特化处理（无分支优化）
+    if constexpr (sizeof(T) == 2) {
 
-    // 按字节处理，根据字节序调整位移量
-    for (size_t i = 0; i < sizeof(T); ++i)
-    {
-        const size_t shift = big_endian ?
-            8 * (sizeof(T) - 1 - i) : // 大端序：高位在前
-            8 * i;                   // 小端序：低位在前
+        value = big_endian
+            ? (static_cast<T>(bytes[0]) << 8) | bytes[1]
+            : (static_cast<T>(bytes[1]) << 8) | bytes[0];
+    }
+    // 32位类型特化处理（无分支优化）  
+    else if constexpr (sizeof(T) == 4) {
+        value = big_endian
+            ? (static_cast<T>(bytes[0]) << 24) | (static_cast<T>(bytes[1]) << 16)
+            | (static_cast<T>(bytes[2]) << 8) | bytes[3]
+            : (static_cast<T>(bytes[3]) << 24) | (static_cast<T>(bytes[2]) << 16)
+            | (static_cast<T>(bytes[1]) << 8) | bytes[0];
+    }
+    // 其他类型（8/64位）通用处理
+    else {
+        // 初始化输出值
+        value = 0;
 
-        value |= static_cast<T>(bytes[i]) << shift;
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            // 计算当前字节的数组索引（考虑字节序）
+            const size_t idx = big_endian ? sizeof(T) - 1 - i : i;
+
+            // 字节移位并合并（注意移位次数为8*i而不是8*idx）
+            value |= static_cast<T>(bytes[idx]) << (8 * i);
+        }
     }
 }
 
+
 /**
- * @brief 将整数值写入字节数组
- * @tparam T 源整数类型
- * @param value 输入值
- * @param[out] bytes 输出缓冲区
- * @param big_endian 是否使用大端序(默认小端)
+ * @brief 将整数值转换为字节数组
+ * @tparam T 源整数类型（uint8_t/int16_t/uint32_t等）
+ * @param[in] value 待转换的整数值
+ * @param[out] bytes 输出缓冲区（必须至少能容纳sizeof(T)字节）
+ * @param[in] big_endian 是否使用大端字节序（默认小端）  True 大端 False 小端
  *
- * @note 会自动截断超出字节范围的高位数据
- */
+ * @note 功能特性：
+ * - 支持8/16/32/64位整型
+ * - 自动处理字节序转换
+ * - 16/32位类型使用无分支优化
+ * - 高位自动截断（安全处理整数降级）
+ *
+ * */
 template <typename T>
 inline void valueToBytes(T value, uint8_t* bytes, bool big_endian = false)
 {
+    // 编译期类型检查
     static_assert(std::is_integral_v<T>, "Source type must be integral");
+    static_assert(sizeof(T) <= 8, "Max 64-bit supported");
 
-    // 逐个字节提取并存储
-    for (size_t i = 0; i < sizeof(T); ++i)
-    {
-        const size_t shift = big_endian ?
-            8 * (sizeof(T) - 1 - i) : // 大端序：高位在前
-            8 * i;                   // 小端序：低位在前
-
-        bytes[i] = static_cast<uint8_t>((value >> shift) & 0xFF);
+     // 16位类型特化处理
+    if constexpr (sizeof(T) == 2) {
+        /*
+         * 内存布局控制：
+         * 大端序：高字节 → bytes[0], 低字节 → bytes[1]
+         * 小端序：低字节 → bytes[0], 高字节 → bytes[1]
+         */
+        bytes[big_endian ? 0 : 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        bytes[big_endian ? 1 : 0] = static_cast<uint8_t>(value & 0xFF);
+    }
+    // 32位类型特化处理
+    else if constexpr (sizeof(T) == 4) {
+        bytes[big_endian ? 0 : 3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        bytes[big_endian ? 1 : 2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        bytes[big_endian ? 2 : 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        bytes[big_endian ? 3 : 0] = static_cast<uint8_t>(value & 0xFF);
+    }
+    // 通用处理（支持8/64位）
+    else {
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            const size_t shift = big_endian ?
+                8 * (sizeof(T) - 1 - i) :
+                8 * i;
+            bytes[i] = static_cast<uint8_t>((value >> shift) & 0xFF);
+        }
     }
 }
-
-
-/**
- * @brief 电流转换特化（q15格式）
- */
-template <>
-class DataConverter<float> {
-public:
-    static constexpr float Q15_SCALE = 32767.0f;
-
-    static float bytesToCurrent(const uint8_t* bytes) {
-        int16_t raw = DataConverter<int16_t>::bytesToValue(bytes);
-        return static_cast<float>(raw) / Q15_SCALE;
-    }
-
-    static void currentToBytes(float value, uint8_t* output) {
-        int16_t raw = static_cast<int16_t>(value * Q15_SCALE);
-        DataConverter<int16_t>::valueToBytes(raw, output);
-    }
-};
 
 
 
