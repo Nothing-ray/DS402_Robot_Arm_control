@@ -27,6 +27,12 @@
     <ClInclude Include="Test_module.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PDO_config.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CAN_processing.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">

@@ -71,7 +71,10 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>F:\刀客塔\第二代手臂通信\boost_1_86_0;$(IncludePath)</IncludePath>
+    <IncludePath>F:\刀客塔\第二代手臂通信\boost_1_86_0;F:\刀客塔\第二代手臂通信\boost_1_86_0;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>F:\刀客塔\第二代手臂通信\boost_1_86_0;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -133,8 +136,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="CAN_frame.hpp" />
+    <ClInclude Include="CAN_processing.hpp" />
     <ClInclude Include="CLASS_Motor.hpp" />
     <ClInclude Include="Data_processing.hpp" />
+    <ClInclude Include="PDO_config.hpp" />
     <ClInclude Include="Test_module.hpp" />
   </ItemGroup>
   <ItemGroup>

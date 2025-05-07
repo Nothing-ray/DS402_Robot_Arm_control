@@ -3,231 +3,193 @@
 #define PDO_CONFIG_HPP
 
 #include <cstdint>
-#include <cstddef>
 #include <vector>
 #include <stdexcept>
-#include <string>
 #include "class_motor.hpp"
 
-/**
- * @brief 将逻辑电机编号转换为 CANopen SDO 从站 ID
- *
- * 在 CANopen 协议中，每个电机设备通常分配一个唯一的 SDO 从站 ID，
- * 本函数用于将逻辑编号 (`motorIndex = 1..N`) 映射到 SDO 通信 ID (`0x601..0x60N`)。
- *
- * @param motorIndex 逻辑电机编号（通常从 1 开始编号）
- * @return uint16_t 对应的 SDO 从站 ID，例如 `motorIndex=1` 返回 `0x601`
- * @throws std::out_of_range 若 `motorIndex` 不在允许范围内（1..12）
+
+
+#define TPDO true
+#define RPDO false
+
+// ====================== 编译期配置宏 ====================== //
+// 通过定义这些宏可以集中配置PDO映射关系
+
+
+/** 
+ * @brief PDO映射条目模板（不包含具体电机ID） MAP_ENTRY 定义
+ * @param isTx          方向(true=TPDO, false=RPDO)
+ * @param pdoIndex      PDO通道号(1-4)
+ * @param index         对象字典索引  目标要写入的地址
+ * @param subIndex      对象字典子索引 写入地址的子索引
+ * @param offsetInPdo   在PDO数据帧中的字节偏移
+ * @param size          数据长度(字节)
+ * @param motorFieldOffset Motor类中对应字段的偏移量 用于进行线性查找
  */
-inline uint16_t toSdoMotorId(uint8_t motorIndex)
-{
-    // 检查输入值是否在合理范围 (1..12)
-    // 在 CANopen 规范中，电机 ID 通常有最大值限制，避免地址冲突
-    if (motorIndex == 0 || motorIndex > 12) {
-        throw std::out_of_range("motorIndex must be 1..12"); // 超出范围则抛出异常
-    }
 
-    // 计算并返回对应的 SDO 从站 ID
-    // 按照规则：motorIndex=1 => 0x601, motorIndex=2 => 0x602 ...
-    return uint16_t(0x600 + motorIndex);
-}
+/*  RPDO: 上位机→下位机   TPDO:下位机→上位机  */
 
+// RPDO1 配置 (0x200 + NodeID)
+#define RPDO1_MAPPINGS \
+    MAP_ENTRY(RPDO, 1, OD_TARGET_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_actual)) \
+    MAP_ENTRY(RPDO, 1, OD_CONTROL_WORD,    0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.statusWordRaw))
 
+// RPDO2 配置 (0x300 + NodeID)
+#define RPDO2_MAPPINGS \
+    MAP_ENTRY(RPDO, 2, OD_TARGET_VELOCITY, 0x00, 0, 2, offsetof(Motor, velocity.raw_target)) \
+    MAP_ENTRY(RPDO, 2, OD_TARGET_CURRENT,  0x00, 2, 2, offsetof(Motor, current.raw_target))
 
+// TPDO1 配置 (0x180 + NodeID)
+#define TPDO1_MAPPINGS \
+    MAP_ENTRY(TPDO,  1, OD_ACTUAL_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_actual)) \
+    MAP_ENTRY(TPDO,  1, OD_STATUS_WORD,     0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.statusWordRaw))
 
-/**
- * @brief 根据逻辑电机编号与 PDO 通道编号，计算 RPDO 的 COB-ID
- *
- * 兼容 1~4 通道的 RPDO:
- *  - RPDO1 => 0x200 + motorIndex
- *  - RPDO2 => 0x300 + motorIndex
- *  - RPDO3 => 0x400 + motorIndex
- *  - RPDO4 => 0x500 + motorIndex
- *
- * @param motorIndex 逻辑电机编号 (通常为 1..N)，用于区分同一条 CAN 总线下的不同电机
- * @param pdoIndex   PDO 通道编号 (1..4)，对应 RPDO1..RPDO4
- * @return 计算出的 RPDO COB-ID。例如 motorIndex=1, pdoIndex=1 => 0x201
- * @throws std::out_of_range 若 pdoIndex 不在 1..4 范围
- */
-inline uint32_t toRpdoCobId(uint8_t motorIndex, uint8_t pdoIndex)
-{
-    switch (pdoIndex)
-    {
-    case 1: return 0x200 + motorIndex; // RPDO1
-    case 2: return 0x300 + motorIndex; // RPDO2
-    case 3: return 0x400 + motorIndex; // RPDO3
-    case 4: return 0x500 + motorIndex; // RPDO4
-    default:
-        throw std::out_of_range("Unsupported RPDO pdoIndex (valid 1..4)");
-    }
-}
+// TPDO2 配置 (0x280 + NodeID)
+#define TPDO2_MAPPINGS \
+    MAP_ENTRY(TPDO,  2, OD_ACTUAL_VELOCITY, 0x00, 0, 2, offsetof(Motor, velocity.raw_actual)) \
+    MAP_ENTRY(TPDO,  2, OD_ACTUAL_CURRENT,  0x00, 2, 2, offsetof(Motor, current.raw_actual))
+
+// ====================== 核心数据结构 ====================== //
 
 /**
- * @brief 根据逻辑电机编号与 PDO 通道编号，计算 TPDO 的 COB-ID
- *
- * 兼容 1~4 通道的 TPDO:
- *  - TPDO1 => 0x180 + motorIndex
- *  - TPDO2 => 0x280 + motorIndex
- *  - TPDO3 => 0x380 + motorIndex
- *  - TPDO4 => 0x480 + motorIndex
- *
- * @param motorIndex 逻辑电机编号 (通常为 1..N)，用于区分同一条 CAN 总线下的不同电机
- * @param pdoIndex   PDO 通道编号 (1..4)，对应 TPDO1..TPDO4
- * @return 计算出的 TPDO COB-ID。例如 motorIndex=2, pdoIndex=3 => 0x382
- * @throws std::out_of_range 若 pdoIndex 不在 1..4 范围
+ * @brief PDO映射条目模板（不包含具体电机ID）
+ * @param isTx          方向(true=TPDO, false=RPDO)
+ * @param pdoIndex      PDO通道号(1-4)
+ * @param index         对象字典索引  目标要写入的地址
+ * @param subIndex      对象字典子索引 写入地址的子索引
+ * @param offsetInPdo   在PDO数据帧中的字节偏移
+ * @param size          数据长度(字节)
+ * @param motorFieldOffset Motor类中对应字段的偏移量 用于进行线性查找
  */
-inline uint32_t toTpdoCobId(uint8_t motorIndex, uint8_t pdoIndex)
-{
-    switch (pdoIndex)
-    {
-    case 1: return 0x180 + motorIndex; // TPDO1
-    case 2: return 0x280 + motorIndex; // TPDO2
-    case 3: return 0x380 + motorIndex; // TPDO3
-    case 4: return 0x480 + motorIndex; // TPDO4
-    default:
-        throw std::out_of_range("Unsupported TPDO pdoIndex (valid 1..4)");
-    }
-}
+#define MAP_ENTRY(isTx, pdoIndex, index, subIndex, offsetInPdo, size, motorFieldOffset) \
+    {isTx, pdoIndex, index, subIndex, offsetInPdo, size, motorFieldOffset},
 
 
-/*****************************************************************************
- 模板结构：表示“单个电机”常见的固定映射
- ****************************************************************************/
-
- /**
-  * @brief 单电机 PDO 映射模板 (PdoMappingTemplate)
-  *
-  * 该结构体描述了 _单个电机_ 在某个 PDO 通道上的对象字典映射关系，作为 _模板_ 存储：
-  * - _不包含 motorIndex_，因为它适用于所有电机
-  * - 仅描述 _某个 PDO 通道_ 内部的数据映射，如：
-  *   - RPDO1 (pdoIndex=1) 映射  目标位置 (OD_TARGET_POSITION)
-  *   - TPDO1 (pdoIndex=1) 映射  实际位置 (OD_ACTUAL_POSITION)
-  * - 在  初始化期 ，会基于该模板  复制并补充 motorIndex ，生成最终的 `PdoMappingEntry`
-  *
-  * @brief PdoMappingTemplate::isTx              PDO 方向 (true: TPDO, false: RPDO)
-  * @brief PdoMappingTemplate::pdoIndex          PDO 通道编号 (1..4)
-  * @brief PdoMappingTemplate::index             映射的对象字典索引 (16 位)
-  * @brief PdoMappingTemplate::subIndex          映射的对象字典子索引 (通常为 0)
-  * @brief PdoMappingTemplate::offsetInPdo       在 PDO 数据帧中的偏移量 (字节)
-  * @brief PdoMappingTemplate::size              映射数据长度 (字节)
-  * @brief PdoMappingTemplate::motorFieldOffset  在 Motor 结构体中的字段偏移量
-  */
-struct PdoMappingTemplate
-{
-    bool     isTx;         ///< PDO 方向 (true: TPDO, false: RPDO)
-    uint8_t  pdoIndex;     ///< PDO 通道编号 (1..4)
-    uint16_t index;        ///< 映射的对象字典索引 (16 位)
-    uint8_t  subIndex;     ///< 映射的对象字典子索引 (通常为 0)
-    uint8_t  offsetInPdo;  ///< 在 PDO 数据帧中的起始字节
-    uint8_t  size;         ///< 映射数据长度 (字节)
-    size_t   motorFieldOffset; ///< 在 Motor 结构体中的字段偏移量
+//将编译宏转化为结构体
+struct PdoMappingTemplate {
+    bool     isTx;              ///< 方向(true: TPDO, false: RPDO)
+    uint8_t  pdoIndex;          ///< PDO通道号(1-4)
+    uint16_t index;             ///< 对象字典索引
+    uint8_t  subIndex;          ///< 对象字典子索引
+    uint8_t  offsetInPdo;       ///< 在PDO数据帧中的偏移(字节)
+    uint8_t  size;              ///< 数据长度(字节)
+    size_t   motorFieldOffset;  ///< Motor类字段偏移
 };
 
-
-/*****************************************************************************
- 最终的映射条目：带上 motorIndex, 用于实际读写
- ****************************************************************************/
- 
- /**
-  * @brief 最终的 PDO 映射条目 (PdoMappingEntry)
-  * @brief PdoMappingEntry::  motorIndex        逻辑电机编号 (通常 1..N)
-  * @brief PdoMappingEntry::  isTx              PDO 方向 (true: TPDO, false: RPDO)
-  * @brief PdoMappingEntry::  pdoIndex          PDO 通道编号 (1..4)
-  * @brief PdoMappingEntry::  index             映射的对象字典索引 (16 位)
-  * @brief PdoMappingEntry::  subIndex          映射的对象字典子索引 (通常为 0)
-  * @brief PdoMappingEntry::  offsetInPdo       在 PDO 数据帧中的偏移量 (字节)
-  * @brief PdoMappingEntry::  size              映射数据长度 (字节)
-  * @brief PdoMappingEntry::motorFieldOffset  在 Motor 结构体中的字段偏移量
-  */
-struct PdoMappingEntry
-{
-    uint8_t  motorIndex;       ///< 逻辑电机编号 (通常 1..N)
-    bool     isTx;             ///< PDO 方向 (true: TPDO, false: RPDO)
-    uint8_t  pdoIndex;         ///< PDO 通道编号 (1..4)
-    uint16_t index;            ///< 映射的对象字典索引 (16 位)
-    uint8_t  subIndex;         ///< 映射的对象字典子索引 (通常为 0)
-    uint8_t  offsetInPdo;      ///< 在 PDO 数据帧中的偏移量 (字节)
-    uint8_t  size;             ///< 映射数据长度 (字节)
-    size_t   motorFieldOffset; ///< 在 Motor 结构体中的字段偏移量
+/**
+ * @brief 完整PDO映射条目（包含电机ID）
+ */
+struct PdoMappingEntry {
+    uint8_t  motorIndex;        ///< 电机逻辑编号(1-N)
+    bool     isTx;              ///< 方向(true: TPDO, false: RPDO)
+    uint8_t  pdoIndex;          ///< PDO通道号(1-4)
+    uint16_t index;             ///< 对象字典索引
+    uint8_t  subIndex;          ///< 对象字典子索引
+    uint8_t  offsetInPdo;       ///< 在PDO数据帧中的偏移(字节)
+    uint8_t  size;              ///< 数据长度(字节)
+    size_t   motorFieldOffset;  ///< Motor类字段偏移
 };
 
+// ====================== 硬编码配置 ====================== //
 
-/*****************************************************************************
- * 4) 准备一个“单电机模板”数组 (编译期常量),
- *    这表示：每个电机都要映射什么对象, 放在哪个PDO, 偏移多少
- ****************************************************************************/
-inline const std::vector<PdoMappingTemplate>& getDefaultMotorTemplate()
-{
-    // 例如：RPDO1 => 目标位置 (4字节, offset=0), 控制字(2字节, offset=4)
-    //       TPDO1 => 实际位置 (4字节, offset=0)
+/**
+ * @brief 获取默认的单电机PDO映射模板
+ * @return 包含所有预定义映射的const vector
+ * @note 将编译宏整理成向量便于后面批处理 
+ */
+inline const std::vector<PdoMappingTemplate>& getDefaultMotorTemplate() {
     static const std::vector<PdoMappingTemplate> singleMotorTemplate = {
-        // RPDO1
-        { false, 1, OD_TARGET_POSITION, 0x00, 0, 4, offsetof(Motor, position.targetPositionRaw) },
-        { false, 1, OD_CONTROL_WORD,    0x00, 4, 2, offsetof(Motor, stateAndMode.controlWordRaw) },
-        
-        // TPDO1
-        { true,  1, OD_ACTUAL_POSITION, 0x00, 0, 4, offsetof(Motor, position.actualPositionRaw) },
+        // 展开所有预定义的映射
+        RPDO1_MAPPINGS
+        RPDO2_MAPPINGS
+        TPDO1_MAPPINGS
+        TPDO2_MAPPINGS
     };
     return singleMotorTemplate;
 }
 
-/*****************************************************************************
-  在程序启动/机械臂初始化时: 根据 “机械臂实际有几个电机”
-  复制“单电机模板” 生成 “最终映射表” (PdoMappingEntry[]).
- ****************************************************************************/
+// ====================== 运行时构建 ====================== //
 
-
-
- /**
-  * @brief 构建“机械臂”上所有电机的 PDO 映射表 (buildArmMappingTable)
-  *
-  * 该函数在_程序初始化阶段_被调用，用于为_当前机械臂上的所有电机_
-  * 生成一张完整的 PDO 映射表。映射表中的条目来源于_单电机模板_，并在
-  * 复制过程中填充_motorIndex_，以适配不同编号的电机。
-  *
-  * - _编译期_：
-  *   - `getDefaultMotorTemplate()` 定义了_单个电机_的标准 PDO 映射规则。
-  *   - 其中包含 哪些对象字典被映射 ，存在哪个 PDO，占多少字节 等信息。
-  *
-  * - _初始化期_：
-  *   - `motorCount` 指定 本机械臂上实际有几个电机（例如 6、7、12...）。
-  *   - 遍历 motorIndex=1..motorCount，为每个电机 拷贝一份模板数据，
-  *     并填充 `motorIndex` 以形成最终映射表 `std::vector<PdoMappingEntry>`。
-  *
-  * - _运行期_：
-  *   - 该映射表保持不可变，用于 PDO 读写时自动查找 Motor 结构体对应变量，
-  *     例如：解析 TPDO，将 偏移 0 的 4 字节数据填充到 `Motor.position.actualPositionRaw`。
-  *
-  * @param motorCount 机械臂上电机个数 (通常为 6, 7, 12...)，决定最终映射表的大小
-  * @return std::vector<PdoMappingEntry> 生成的 _最终 PDO 映射表_
-  *         其中 `motorIndex=1..motorCount`，其余字段来自 `getDefaultMotorTemplate()`
-  */
-inline std::vector<PdoMappingEntry> buildArmMappingTable(uint8_t motorCount)
-{
+/**
+ * @brief 构建完整的机械臂PDO映射表
+ * @param motorCount 机械臂上的电机数量（范围：1~12，受限于CANopen节点地址规范）
+ * @return 包含所有电机完整PDO映射的列表，每个电机的映射基于预先定义的模板扩展
+ *
+ * @note 此函数核心设计思想：基于单个电机的标准PDO映射模板，通过复制扩展实现机械臂多电机的批量映射。
+ *       这种设计提供良好的扩展性，新增电机时只需简单倍增模板条目。
+ */
+inline std::vector<PdoMappingEntry> buildArmMappingTable(uint8_t motorCount) {
+    // 最终生成的完整映射表容器
     std::vector<PdoMappingEntry> finalTable;
-    finalTable.reserve(motorCount * getDefaultMotorTemplate().size()); // 预分配空间，提高性能
 
-    for (uint8_t m = 1; m <= motorCount; m++)
-    {
-        // 遍历单电机模板，并复制到最终表中
-        for (auto& tmpl : getDefaultMotorTemplate())
-        {
-            PdoMappingEntry entry;
-            entry.motorIndex = m;               ///< 赋值 motorIndex，区分不同电机
-            entry.isTx = tmpl.isTx;             ///< 继承 TPDO / RPDO 方向
-            entry.pdoIndex = tmpl.pdoIndex;     ///< 继承 PDO 通道编号 (1~4)
-            entry.index = tmpl.index;           ///< 继承对象字典索引
-            entry.subIndex = tmpl.subIndex;     ///< 继承对象字典子索引
-            entry.offsetInPdo = tmpl.offsetInPdo; ///< 继承 PDO 数据帧内偏移
-            entry.size = tmpl.size;             ///< 继承数据字节大小
-            entry.motorFieldOffset = tmpl.motorFieldOffset; ///< 继承 `Motor` 结构体字段偏移
+    // 步骤1：获取单个电机的标准PDO映射模板
+    // 此处使用单例模式的const引用避免重复构造模板数据
+    const auto& templateTable = getDefaultMotorTemplate();
 
-            finalTable.push_back(entry); // 存入最终映射表
+    // 步骤2：预分配最终容器内存空间（重要性能优化）
+    // 计算公式：总电机数 × 单电机模板条目数 → 预分配准确内存避免动态扩容开销
+    // 例如：3个电机 × 每条PDO通道2个条目 × 4个PDO → 3×8=24条目
+    finalTable.reserve(motorCount * templateTable.size());
+
+    // 步骤3：电机循环 - 遍历每个需要配置的电机
+    // motorIndex从1开始，遵循工业设备常见1-based编号规范（如CANopen节点1~12）
+    // 注意：motorIndex=0是保留地址，部分硬件使用0作为广播地址
+    for (uint8_t motorIndex = 1; motorIndex <= motorCount; ++motorIndex) {
+        // 步骤3.1：模板循环 - 为当前电机复制所有模板条目
+        for (const auto& tmpl : templateTable) {
+            // 步骤3.1.1：构造完整映射条目
+            // 核心操作：将模板条目与具体的电机ID结合，生成CAN网络中的真实映射项
+            finalTable.push_back({
+                motorIndex,             // 填充实际电机ID，此值将影响最终COB-ID生成
+                tmpl.isTx,              // 继承模板方向属性（true=TPDO，false=RPDO）
+                tmpl.pdoIndex,          // PDO通道编号（如RPDO1=1, TPDO2=2等）
+                tmpl.index,             // 对象字典索引值（如0x607A=目标位置）
+                tmpl.subIndex,          // 对象字典子索引（通常为0x00）
+                tmpl.offsetInPdo,       // 数据在PDO报文中的字节偏移（需对齐内存布局）
+                tmpl.size,              // 数据长度（字节）必需与OD定义一致
+                tmpl.motorFieldOffset   // Motor类成员偏移，用于与PDO数据内存拷贝
+                });
+            // 示例：当motorIndex=3时，模板条目会被实例化为：
+            // {3, false, 1, 0x607A, 0x00, 0, 4, offsetof(Motor, position.raw_target)}
         }
     }
 
+    // 步骤4：返回生成的完整映射表
+    // 此表可被上层用于：
+    // 1. 初始化CANopen栈的PDO映射配置
+    // 2. 构造PDO数据包时快速查找映射关系
+    // 3. 将收到/发送的PDO数据与具体电机的内存区域关联
     return finalTable;
 }
 
+
+// ====================== COB-ID转换工具 ====================== //
+
+inline uint16_t toSdoMotorId(uint8_t motorIndex) {
+    if (motorIndex == 0 || motorIndex > 12) {
+        throw std::out_of_range("motorIndex must be 1..12");
+    }
+    return uint16_t(0x600 + motorIndex);
+}
+
+inline uint32_t toRpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
+    switch (pdoIndex) {
+    case 1: return 0x200 + motorIndex;
+    case 2: return 0x300 + motorIndex;
+    case 3: return 0x400 + motorIndex;
+    case 4: return 0x500 + motorIndex;
+    default: throw std::out_of_range("Invalid RPDO index (1-4)");
+    }
+}
+
+inline uint32_t toTpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
+    switch (pdoIndex) {
+    case 1: return 0x180 + motorIndex;
+    case 2: return 0x280 + motorIndex;
+    case 3: return 0x380 + motorIndex;
+    case 4: return 0x480 + motorIndex;
+    default: throw std::out_of_range("Invalid TPDO index (1-4)");
+    }
+}
 
 #endif // PDO_CONFIG_HPP

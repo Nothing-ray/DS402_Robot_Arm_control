@@ -1,4 +1,4 @@
-#include <cstdint>
+ï»¿#include <cstdint>
 #include <array>
 #include <string>
 #include <cmath>
@@ -10,11 +10,13 @@
 #include <chrono>
 #include <stdint.h>
 #include <type_traits>
-
+#include <locale>
+#include <codecvt>
 
 #include "CLASS_Motor.hpp"
 #include "Test_module.hpp"
 #include "Data_processing.hpp"
+#include "CAN_processing.hpp"
 
 
 
@@ -23,26 +25,9 @@
 
 int main(){
 
-
-    std::cout << 1 << std::endl;
-    /**/
-    std::array<Motor, 6> motors = {
-        Motor(1),  // µç»úID 1
-        Motor(2),  // µç»úID 2
-        Motor(3),  // µç»úID 3
-        Motor(4),  // µç»úID 4
-        Motor(5),  // µç»úID 5
-        Motor(6)   // µç»úID 6
-    };
-    // 2. ÖØÖÃÔËĞĞ±êÖ¾£¨È·±£Ö®Ç°µÄ×´Ì¬±»Çå³ı£©
-    running = true;
-    // 3. µ÷ÓÃ²âÊÔº¯Êı£¬²âÊÔ5Ãë
-    std::cout << "=== Starting Motor Class Test ===\n";
-    testMotorClass(motors, 0.5);  // µÚ¶ş¸ö²ÎÊıÊÇ²âÊÔ³ÖĞøÊ±¼ä(Ãë)
-
-
-
-
+	std::locale::global(std::locale(""));  // ä½¿ç”¨ç³»ç»Ÿé»˜è®¤locale
+	std::wcout.imbue(std::locale());
+	testCANProcessing();
 
 
 	return 0;

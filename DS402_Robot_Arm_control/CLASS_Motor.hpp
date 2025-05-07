@@ -173,9 +173,9 @@ struct alignas(64) AlignedRawData {
 
 /**
  * @brief DS402 协议下常用对象字典地址示例（仅供参考）
- * 一般是 0xXXXX:subIndex, 可以在这里统一声明。
+ * 一般是 0xXXXX:subIndex, 可以在这里统一声明。 箭头符号代表向下位机写入/读取
  */
-static constexpr uint16_t OD_CONTROL_WORD = 0x6040;  /// 控制字>>> 0x6040
+static constexpr uint16_t OD_CONTROL_WORD = 0x6040;  /// 控制字>>> 0x6040  
 static constexpr uint16_t OD_STATUS_WORD = 0x6041;  /// 状态字<<< 0x6041
 static constexpr uint16_t OD_MODES_OF_OPERATION = 0x6060;  /// 运行模式(写)>>> 0x6060
 static constexpr uint16_t OD_MODES_OF_DISPLAY = 0x6061;  /// 运行模式(读)<<< 0x6061
@@ -223,12 +223,12 @@ struct StateAndMode
     // DS402: 控制字(0x6040)、状态字(0x6041)通常各2字节
     // 运行模式(0x6060)通常1字节，错误码(0x603F)通常2字节
     volatile struct {
-        volatile uint8_t controlWordRaw[2];     /// 控制字（原始2字节）>>
-        volatile uint8_t statusWordRaw[2];      /// 状态字（原始2字节）<<
+        volatile uint8_t controlWordRaw[2];     /// 控制字（原始2字节）>> 发送 0x6040
+        volatile uint8_t statusWordRaw[2];      /// 状态字（原始2字节）<< 接收 0x6041
     }controlData;
-    volatile struct {
-        volatile uint8_t modeOfOperationRaw[1]; /// 运行模式（原始1字节）>>
-        volatile uint8_t errorCodeRaw[2];       /// 电机错误代码（原始2字节）<<
+    volatile struct { 
+        volatile uint8_t modeOfOperationRaw[1]; /// 运行模式（原始1字节）>> 发送  0x6060
+        volatile uint8_t errorCodeRaw[2];       /// 电机错误代码（原始2字节）<< 接收  0x603F
     }modeData;
 
     const uint16_t controlWordIndex = OD_CONTROL_WORD;      // 0x6040
@@ -296,8 +296,8 @@ struct MotorCurrent {
 
     // 原始数据区（带缓存行填充）
 
-    AlignedRawData<2,int16_t> raw_actual;///< 实际电流原始数据
-    AlignedRawData<2,int16_t> raw_target;///< 目标电流原始数据
+    AlignedRawData<2,int16_t> raw_actual;///< 实际电流原始数据 0x6078
+    AlignedRawData<2,int16_t> raw_target;///< 目标电流原始数据 0x6071
 
     // 转换值组（独立缓存行）
     /** @brief 实际电流转换结果组 */
@@ -310,8 +310,8 @@ struct MotorCurrent {
     
 
     // 协议常量（请保持硬编码）
-    const uint16_t actual_Current_Index = OD_ACTUAL_CURRENT;  ///< 实际电流对象字典索引
-    const uint16_t target_Current_Index = OD_TARGET_CURRENT;  ///< 目标电流对象字典索引
+    const uint16_t actual_Current_Index = OD_ACTUAL_CURRENT;  ///< 实际电流对象字典索引 0x6078
+    const uint16_t target_Current_Index = OD_TARGET_CURRENT;  ///< 目标电流对象字典索引 0x6071
 
     /**
      * @brief 检查待处理的数据类型
@@ -387,8 +387,8 @@ struct MotorPosition {
     alignas(64) std::atomic<uint8_t> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<4,int32_t> raw_actual;  ///< 实际位置原始数据
-    AlignedRawData<4,int32_t> raw_target;  ///< 目标位置原始数据
+    AlignedRawData<4,int32_t> raw_actual;  ///< 实际位置原始数据 0x6064
+    AlignedRawData<4,int32_t> raw_target;  ///< 目标位置原始数据 0x607A
 
     // 转换值组（独立缓存行）
     alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
@@ -478,8 +478,8 @@ struct MotorVelocity {
     alignas(64) std::atomic<uint8_t> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<2,int16_t> raw_actual;  ///< 实际速度原始数据
-    AlignedRawData<2,int16_t> raw_target;  ///< 目标速度原始数据
+    AlignedRawData<2,int16_t> raw_actual;  ///< 实际速度原始数据  0x606C
+    AlignedRawData<2,int16_t> raw_target;  ///< 目标速度原始数据  0x60FF
 
     // 转换值组（独立缓存行）
     alignas(64) std::atomic<int16_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
@@ -533,8 +533,8 @@ struct MotorVelocity {
  */
 struct MotorAccelDecel {
     // 数据存储区（复用模板）
-    AlignedRawData<2,uint16_t> raw_accel;  ///< 加速度值(单位RPM/min)
-    AlignedRawData<2,uint16_t> raw_decel;  ///< 减速度值(单位RPM/min)
+    AlignedRawData<2,uint16_t> raw_accel;  ///< 加速度值(单位RPM/min)  0x6083
+    AlignedRawData<2,uint16_t> raw_decel;  ///< 减速度值(单位RPM/min)  0x6084
 
     // 协议常量（DS402标准）
     const uint16_t accel_Index = OD_ACCELERATION;  ///< 0x6083
@@ -619,7 +619,7 @@ public:
     void init() {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        std::cout << 2 << std::endl;
+        
 
         //  状态模式初始化
         stateAndMode.refresh = false;
@@ -632,13 +632,13 @@ public:
         stateAndMode.modeData.modeOfOperationRaw[0] =
             static_cast<uint8_t>(MotorMode::PROFILE_TORQUE); // 默认选择电流模式，在电流为0的情况下是安全的
 
-        std::cout << 3 << std::endl;
+        
         // 电流数据初始化
         current.flags_.store(0);
         
         current.raw_actual.atomicWriteValue(0);
         current.raw_target.atomicWriteValue(0);
-        std::cout << 4 << std::endl;
+        
 
         current.actual_current.store(0.0f);
         current.target_current.store(0.0f);
@@ -650,7 +650,7 @@ public:
         position.raw_target.atomicWriteValue(0);
         position.actual_degree.store(0.0f);
         position.target_degree.store(0.0f);
-        std::cout << 5 << std::endl;
+        
 
         // 速度数据初始化
         velocity.flags_.store(0);
@@ -699,7 +699,7 @@ public:
         // "接收"原始数据需要刷新的情况  原始值→编码器值→物理值
         if (data.needsProcess(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH)) {
 
-            //电流需要刷新
+            //实际电流原始值需要刷新
             if constexpr (std::is_same_v<T, MotorCurrent>) {
                 // 电流：原始→编码器→物理值
                 int16_t raw_val;
@@ -715,7 +715,7 @@ public:
                 return;
             }
 
-            //位置需要刷新
+            //实际位置原始值需要刷新
             else if constexpr (std::is_same_v<T, MotorPosition>) {
                 // 位置：原始→编码器→角度
                 int32_t raw_val;
@@ -732,7 +732,7 @@ public:
                 return;
             }
 
-            //速度需要刷新
+            //实际速度原始值需要刷新
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
                 // 速度：原始→编码器→RPM
                 int16_t raw_val;
@@ -752,7 +752,7 @@ public:
         // 检查编码器值接收标志（从编码器→原始&物理值）
         if (data.needsProcess(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH)) {
 
-            //电流需要刷新
+            //实际电流编码器需要刷新
             if constexpr (std::is_same_v<T, MotorCurrent>) {
                 const int16_t enc_val = data.actual_encoder.load();
 
@@ -769,7 +769,7 @@ public:
                 return;
             }
 
-            //位置需要刷新
+            //实际位置编码器需要刷新
             else if constexpr (std::is_same_v<T, MotorPosition>) {
                 const int32_t enc_val = data.actual_encoder.load();
 
@@ -788,7 +788,7 @@ public:
                 return;
             }
 
-            //速度需要刷新
+            //实际速度编码器需要刷新
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
                 const int16_t enc_val = data.actual_encoder.load();
 
@@ -812,7 +812,7 @@ public:
         if (data.needsProcess(T::Flags::TARGET_DATA_SEND_NEED_REFRESH))
         {
 
-            // 电流发送处理
+            // 目标电流物理值发送处理
             if constexpr (std::is_same_v<T, MotorCurrent>) {
                 // 物理值→编码器值（电流mA→整型计数）
                 const float target_current = data.target_current.load();
@@ -829,7 +829,7 @@ public:
                 return;
             }
 
-            // 位置发送处理
+            // 目标位置物理值发送处理
             else if constexpr (std::is_same_v<T, MotorPosition>) {
                 // 物理值（角度）→编码器值
                 const float target_deg = data.target_degree.load();
@@ -848,7 +848,7 @@ public:
                 return;
             }
 
-            // 速度发送处理
+            // 目标速度物理值发送处理
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
                 // 物理值（RPM）→编码器值
                 const float target_rpm = data.target_rpm.load();
@@ -871,7 +871,7 @@ public:
         // 检查发送数据标志（从编码器值→原始值&物理值）
         if (data.needsProcess(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH)) {
 
-            // 电流发送处理（1编码器值=1mA）
+            // 目标电流编码器发送处理（1编码器值=1mA）
             if constexpr (std::is_same_v<T, MotorCurrent>) {
                 const int32_t enc_val = data.target_encoder.load();
 
@@ -888,7 +888,7 @@ public:
                 return;
             }
 
-            // 位置发送处理
+            // 目标位置编码器发送处理
             else if constexpr (std::is_same_v<T, MotorPosition>) {
                 const int32_t enc_val = data.target_encoder.load();
 
@@ -907,7 +907,7 @@ public:
                 return;
             }
 
-            // 速度发送处理（1编码器值=1RPM）
+            // 目标速度编码器发送处理（1编码器值=1RPM）
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
                 const int16_t enc_val = data.target_encoder.load();
 

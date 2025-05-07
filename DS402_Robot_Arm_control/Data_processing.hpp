@@ -11,6 +11,8 @@
 #include <type_traits>
 #include <cstdint>
 #include <atomic>
+#include <iomanip>
+#include <string>
 
 /*************************************/
 /*
@@ -184,6 +186,48 @@ inline void valueToBytes(T value, uint8_t* bytes, bool big_endian = false)
 
 
 
+/**
+ * @brief 打印CAN帧二进制数据的调试信息
+ *
+ * @param binaryData 要打印的二进制数据向量，格式应符合CAN帧规范：
+ *                   [0]   - 帧信息字节（包含DLC和标志位）
+ *                   [1-4] - 帧ID（大端序）
+ *                   [5-12]- 数据域（实际长度由DLC决定）
+ *
+ * @note 输出格式示例：
+ *       [DEBUG] Frame BinaryData: 02 00 00 01 23 aa bb 00 00 00 00 00 00
+ *       其中：
+ *       - 02      : 帧信息（DLC=2）
+ *       - 00000123: 帧ID=0x123
+ *       - aabb    : 数据字节
+ *       - 00...   : 填充字节
+ *
+ * @warning 此函数仅用于调试目的，会修改cout的格式状态（hex/dec）
+ */
+inline void PrintCANbinaryData(const std::vector<uint8_t>& binaryData)
+{
+    // 保存当前流状态以便恢复（RAII风格）
+    std::ios oldState(nullptr);
+    oldState.copyfmt(std::cout);
+
+    // 输出调试头
+    std::cout << "[DEBUG] Frame BinaryData: ";
+
+    // 遍历并打印每个字节
+    for (uint8_t byte : binaryData) {
+        std::cout << std::hex << std::uppercase           // 16进制大写输出
+            << std::setw(2)          // 固定2字符宽度
+            << std::setfill('0')     // 前导零填充
+            << static_cast<int>(byte)// 避免char类型特殊处理
+            << " ";
+    }
+
+    // 恢复十进制输出并换行
+    std::cout << std::nouppercase << std::dec << std::endl;  // 恢复小写状态
+    // 恢复原始流格式
+    std::cout.copyfmt(oldState);
+    return;
+}
 
  
 
