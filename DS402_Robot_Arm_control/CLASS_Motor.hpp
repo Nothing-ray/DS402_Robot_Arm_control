@@ -1,4 +1,39 @@
-﻿#ifndef CLASS_MOTOR_HPP
+﻿/**
+ * @file CLASS_Motor.hpp
+ * @brief 定义了基于CANopen DS402协议的电机控制核心数据结构和类
+ *
+ * @details 本文件实现了机械臂驱动程序的核心电机类，采用面向对象设计和现代C++特性，
+ * 为多线程环境下的高性能电机控制提供原子化、缓存友好的数据访问接口。该设计针对
+ * ARM64架构（如Cortex-A55/A76）进行了优化，并兼容x86平台，支持Windows和Linux系统。
+ *
+ * 主要功能包括：
+ * - 封装符合DS402标准的对象字典地址和电机运行模式
+ * - 提供状态与模式、电流、位置、速度、加减速等电机参数的统一管理
+ * - 实现基于缓存行对齐的原子数据结构，确保多线程安全访问
+ * - 支持PDO数据刷新机制，实现原始数据到物理量的自动转换
+ * - 为未来扩展预留接口，如Python绑定、轨迹回放等功能
+ *
+ * @note 该模块专为2ms实时同步周期设计，适用于6轴机械臂控制系统。
+ * 所有数据结构均考虑了内存布局优化以减少伪共享，提高并发性能。
+ *
+ * @par 线程模型：
+ * - 接收线程：更新实际值并调用刷新函数
+ * - 发送线程：读取目标值并发送PDO帧
+ * - 规划线程：计算目标值并触发刷新写入
+ * 各线程通过原子标志位协调数据刷新流程，避免锁竞争。
+ *
+ * @par 设计亮点：
+ * - 使用模板化的缓存行对齐结构体 `AlignedRawData` 实现类型安全的数据视图
+ * - 利用C++17的constexpr和if constexpr提升编译期性能
+ * - 基于位标志的状态管理机制，支持细粒度数据刷新控制
+ */
+
+
+
+
+
+
+#ifndef CLASS_MOTOR_HPP
 #define CLASS_MOTOR_HPP
 
 
@@ -21,6 +56,23 @@
 
 
 #define SENSOR_RANGE 32768
+
+
+/*********** 自定义类型区 ************/
+
+//保证处理同一个物理量使用相同的类型
+
+using Flag_type = uint16_t;  //  专用于处理标志位
+using Current_type = int16_t;  //专用于处理电流
+using Velocity_type = int16_t; //专用于处理速度
+using Position_type = int32_t; //专用于处理位置
+using AccelDecel_type = uint16_t; //专用于处理加减速度
+
+
+
+
+
+
 
 /**
  * @brief 硬件缓存行对齐的原子化数据存储结构体模板
@@ -150,7 +202,7 @@ struct alignas(64) AlignedRawData {
 
         //=== 防误用设计 ===//
         AlignedRawData() = default;
-        ~AlignedRawData() = default;
+        ~AlignedRawData() = default; 
         AlignedRawData(const AlignedRawData&) = delete;
         AlignedRawData& operator=(const AlignedRawData&) = delete;
     };
@@ -185,8 +237,9 @@ static constexpr uint16_t OD_TARGET_CURRENT = 0x6071;   /// 目标电流>>> 0x60
 static constexpr uint16_t OD_ACTUAL_CURRENT = 0x6078;   /// 实际电流<<< 0x6078
 static constexpr uint16_t OD_TARGET_POSITION = 0x607A;  /// 目标位置>>> 0x607A
 static constexpr uint16_t OD_ACTUAL_POSITION = 0x6064;  /// 实际位置<<< 0x6064
-static constexpr uint16_t OD_TARGET_VELOCITY = 0x60FF;  /// 目标速度>>> 0x60FF
-static constexpr uint16_t OD_ACTUAL_VELOCITY = 0x606C;  /// 实际速度<<< 0x606C
+static constexpr uint16_t OD_TARGET_VELOCITY_VELOCITY_MODE = 0x60FF;  /// 目标速度（速度环模式）（电机端未经过编码器的速度）>>> 0x60FF
+static constexpr uint16_t OD_TARGET_VELOCITY_POSITION_MODE = 0x6081; /// 目标速度（位置环模式）（外壳轮廓的速度）>>> 0x6081
+static constexpr uint16_t OD_ACTUAL_VELOCITY = 0x606C;  /// 实际速度（电机末端速度）<<< 0x606C
 
 static constexpr uint16_t OD_ACCELERATION = 0x6083;  /// 加速度>>> 0x6083
 static constexpr uint16_t OD_DECELERATION = 0x6084;  /// 减速度>>> 0x6084
@@ -272,40 +325,44 @@ struct StateAndMode
  */
 struct MotorCurrent {
     /**
-     * @brief 标志位控制枚举
-     * @note 使用单字节存储，最高支持8种状态标志
+     * @brief 标志位控制枚举 
+     * @note 使用双字节存储，最高支持16种状态标志
      * @warning 修改枚举值需同步更新位操作逻辑
      */
-    enum Flags : uint8_t {
-        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
-        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
-
-        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
-        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
-
-        TARGET_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: 目标发送数据（十进制）需要刷新
-        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x20,  ///< 位5: 实际接收数据（十进制）需要刷新
-
-        // 保留位
-        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
-        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
-
+    enum Flags : Flag_type {
         
+        RAW_DATA_SEND_NEED_REFRESH = 0x0001,          ///< 位0: 原始发送数据（十六进制）需要刷新
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x0002,       ///< 位1: 原始接收数据（十六进制）需要刷新
+        ENCODER_DATA_SEND_NEED_REFRESH = 0x0004,      ///< 位2: 编码器发送数据（十进制）需要刷新
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x0008,   ///< 位3: 编码器接收数据（十进制）需要刷新
+        TARGET_DATA_SEND_NEED_REFRESH = 0x0010,       ///< 位4: 目标发送数据（十进制）需要刷新
+        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x0020,    ///< 位5: 实际接收数据（十进制）需要刷新
+        RESERVED_6 = 0x0040,                          ///< 位6: 保留 用于扩展
+        RESERVED_7 = 0x0080,                          ///< 位7: 保留 用于扩展
+        
+        RESERVED_8 = 0x0100,                          ///< 位8: 保留 用于扩展
+        RESERVED_9 = 0x0200,                          ///< 位9: 保留 用于扩展
+        RESERVED_10 = 0x0400,                         ///< 位10: 保留 用于扩展
+        RESERVED_11 = 0x0800,                         ///< 位11: 保留 用于扩展
+        RESERVED_12 = 0x1000,                         ///< 位12: 保留 用于扩展
+        RESERVED_13 = 0x2000,                         ///< 位13: 保留 用于扩展
+        RESERVED_14 = 0x4000,                         ///< 位14: 保留 用于扩展
+        RESERVED_15 = 0x8000                          ///< 位15: 保留 用于扩展
     };
-    alignas(64) std::atomic<uint8_t> flags_{ 0 };
+    alignas(64) std::atomic<Flag_type> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
 
-    AlignedRawData<2,int16_t> raw_actual;///< 实际电流原始数据 0x6078
-    AlignedRawData<2,int16_t> raw_target;///< 目标电流原始数据 0x6071
+    AlignedRawData<2, Current_type> raw_actual;///< 实际电流原始数据 0x6078
+    AlignedRawData<2, Current_type> raw_target;///< 目标电流原始数据 0x6071
 
     // 转换值组（独立缓存行）
     /** @brief 实际电流转换结果组 */
-        alignas(64) std::atomic<int16_t> actual_encoder{ 0 };  ///< 编码器计数表示值
+        alignas(64) std::atomic<Current_type> actual_encoder{ 0 };  ///< 编码器计数表示值
         alignas(64) std::atomic<float> actual_current{ 0.0f }; ///< 物理电流值(安培)
 
     /** @brief 目标电流转换结果组 */
-        alignas(64) std::atomic<int16_t> target_encoder{ 0 };  ///< 编码器计数表示值
+        alignas(64) std::atomic<Current_type> target_encoder{ 0 };  ///< 编码器计数表示值
         alignas(64) std::atomic<float> target_current{ 0.0f }; ///< 物理电流值(安培)
     
 
@@ -368,32 +425,39 @@ struct MotorCurrent {
 struct MotorPosition {
     /**
      * @brief 标志位控制枚举
-     * @note 使用单字节存储，最高支持8种状态标志
+     * @note 使用双字节存储，最高支持16种状态标志
      * @warning 修改枚举值需同步更新位操作逻辑
      */
-    enum Flags : uint8_t {
-        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
-        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
-
-        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
-        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
-
-        TARGET_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: 角度值发送数据（浮点）需要刷新
-        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x20,  ///< 位5: 角度值接收数据（浮点）需要刷新
-
-        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
-        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
+    enum Flags : Flag_type {
+        // 原有8个标志位（位0-位7）
+        RAW_DATA_SEND_NEED_REFRESH = 0x0001,          ///< 位0: 原始发送数据（十六进制）需要刷新
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x0002,       ///< 位1: 原始接收数据（十六进制）需要刷新
+        ENCODER_DATA_SEND_NEED_REFRESH = 0x0004,      ///< 位2: 编码器发送数据（十进制）需要刷新
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x0008,   ///< 位3: 编码器接收数据（十进制）需要刷新
+        TARGET_DATA_SEND_NEED_REFRESH = 0x0010,       ///< 位4: 目标发送数据（十进制）需要刷新
+        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x0020,    ///< 位5: 实际接收数据（十进制）需要刷新
+        RESERVED_6 = 0x0040,                          ///< 位6: 保留 用于扩展
+        RESERVED_7 = 0x0080,                          ///< 位7: 保留 用于扩展
+        // 新增的8个保留位（位8-位15）
+        RESERVED_8 = 0x0100,                          ///< 位8: 保留 用于扩展
+        RESERVED_9 = 0x0200,                          ///< 位9: 保留 用于扩展
+        RESERVED_10 = 0x0400,                         ///< 位10: 保留 用于扩展
+        RESERVED_11 = 0x0800,                         ///< 位11: 保留 用于扩展
+        RESERVED_12 = 0x1000,                         ///< 位12: 保留 用于扩展
+        RESERVED_13 = 0x2000,                         ///< 位13: 保留 用于扩展
+        RESERVED_14 = 0x4000,                         ///< 位14: 保留 用于扩展
+        RESERVED_15 = 0x8000                          ///< 位15: 保留 用于扩展
     };
-    alignas(64) std::atomic<uint8_t> flags_{ 0 };
+    alignas(64) std::atomic<Flag_type> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<4,int32_t> raw_actual;  ///< 实际位置原始数据 0x6064
-    AlignedRawData<4,int32_t> raw_target;  ///< 目标位置原始数据 0x607A
+    AlignedRawData<4, Position_type> raw_actual;  ///< 实际位置原始数据 0x6064
+    AlignedRawData<4, Position_type> raw_target;  ///< 目标位置原始数据 0x607A
 
     // 转换值组（独立缓存行）
-    alignas(64) std::atomic<int32_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
+    alignas(64) std::atomic<Position_type> actual_encoder{ 0 };  ///< 实际编码器计数值  
     alignas(64) std::atomic<float> actual_degree{ 0.0f };  ///< 实际角度值(度)
-    alignas(64) std::atomic<int32_t> target_encoder{ 0 };  ///< 目标编码器计数值
+    alignas(64) std::atomic<Position_type> target_encoder{ 0 };  ///< 目标编码器计数值
     alignas(64) std::atomic<float> target_degree{ 0.0f };  ///< 目标角度值(度)
 
     // 协议常量（DS402标准）
@@ -454,42 +518,55 @@ struct MotorPosition {
  * @brief MotorVelocity::target_rpm            目标转速值(原子float)
  *
  * @brief MotorVelocity::actual_Velocity_Index  实际速度对象字典索引(只读)
- * @brief MotorVelocity::target_Velocity_Index  目标速度对象字典索引(只读)
+ * @brief MotorVelocity::target_Velocity_Index_Velocity_Mode  目标速度对象字典索引(只读)
  */
 struct MotorVelocity {
     /**
      * @brief 标志位控制枚举
-     * @note 使用单字节存储，最高支持8种状态标志
+     * @note 使用双字节存储，最高支持16种状态标志
      * @warning 修改枚举值需同步更新位操作逻辑
      */
-    enum Flags : uint8_t {
-        RAW_DATA_SEND_NEED_REFRESH = 0x01,  ///< 位0: 原始发送数据（十六进制）需要刷新
-        RAW_DATA_RECEIVE_NEED_REFRESH = 0x02,  ///< 位1: 原始接收数据（十六进制）需要刷新
+    enum Flags : Flag_type {
+        
+        RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE = 0x0001,          ///< 位0: 原始发送数据（十六进制）需要刷新(适用于速度模式）
+        RAW_DATA_RECEIVE_NEED_REFRESH = 0x0002,       ///< 位1: 原始接收数据（十六进制）需要刷新
+        ENCODER_DATA_SEND_NEED_REFRESH_VELOCITY_MODE = 0x0004,      ///< 位2: 编码器发送数据（十进制）需要刷新（适用于速度模式）
+        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x0008,   ///< 位3: 编码器接收数据（十进制）需要刷新
+        TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE = 0x0010,       ///< 位4: 目标发送数据（十进制）需要刷新（适用于速度模式）
+        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x0020,    ///< 位5: 实际接收数据（十进制）需要刷新
+        RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE = 0x0040,                          ///< 位6: 原始发送数据（十六进制）需要刷新(适用于位置模式）
+        ENCODER_DATA_SEND_NEED_REFRESH_POSITION_MODE = 0x0080,                          ///< 位7: 编码器发送数据（十进制）需要刷新(适用于位置模式）
+        TARGET_DATA_SEND_NEED_REFRESH_POSITION_MODE = 0x0100,                          ///< 位8: 目标发送数据（十进制）需要刷新（适用于位置模式）
 
-        ENCODER_DATA_SEND_NEED_REFRESH = 0x04,  ///< 位2: 编码器发送数据（十进制）需要刷新
-        ENCODER_DATA_RECEIVE_NEED_REFRESH = 0x08,  ///< 位3: 编码器接收数据（十进制）需要刷新
 
-        TARGET_DATA_SEND_NEED_REFRESH = 0x10,  ///< 位4: 目标速度发送需要刷新
-        ACTUAL_DATA_RECEIVE_NEED_REFRESH = 0x20,  ///< 位5: 实际速度接收需要刷新 
-
-        RESERVED_6 = 0x40,  ///< 位6: 保留 用于扩展
-        RESERVED_7 = 0x80   ///< 位7: 保留 用于扩展
+        RESERVED_9 = 0x0200,                          ///< 位9: 保留 用于扩展
+        RESERVED_10 = 0x0400,                         ///< 位10: 保留 用于扩展
+        RESERVED_11 = 0x0800,                         ///< 位11: 保留 用于扩展
+        RESERVED_12 = 0x1000,                         ///< 位12: 保留 用于扩展
+        RESERVED_13 = 0x2000,                         ///< 位13: 保留 用于扩展
+        RESERVED_14 = 0x4000,                         ///< 位14: 保留 用于扩展
+        RESERVED_15 = 0x8000                          ///< 位15: 保留 用于扩展
     };
-    alignas(64) std::atomic<uint8_t> flags_{ 0 };
+    alignas(64) std::atomic<Flag_type> flags_{ 0 };
 
     // 原始数据区（带缓存行填充）
-    AlignedRawData<2,int16_t> raw_actual;  ///< 实际速度原始数据  0x606C
-    AlignedRawData<2,int16_t> raw_target;  ///< 目标速度原始数据  0x60FF
+    AlignedRawData<2, Velocity_type> raw_actual;  ///< 实际速度原始数据  0x606C
+    AlignedRawData<2, Velocity_type> raw_target_velocity_mode;  ///< 目标速度原始数据（速度模式）  0x60FF
+    AlignedRawData<2, Velocity_type> raw_target_position_mode;  ///< 目标速度原始数据（位置模式）  0x6081
 
     // 转换值组（独立缓存行）
-    alignas(64) std::atomic<int16_t> actual_encoder{ 0 };  ///< 实际编码器计数值  
+    alignas(64) std::atomic<Velocity_type> actual_encoder{ 0 };  ///< 实际编码器计数值  
     alignas(64) std::atomic<float> actual_rpm{ 0.0f };     ///< 实际转速值(RPM)
-    alignas(64) std::atomic<int16_t> target_encoder{ 0 };  ///< 目标编码器计数值
-    alignas(64) std::atomic<float> target_rpm{ 0.0f };     ///< 目标转速值(RPM)
+    alignas(64) std::atomic<Velocity_type> target_encoder_velocity_mode{ 0 };  ///< 目标编码器计数值（速度模式）
+    alignas(64) std::atomic<float> target_rpm_velocity_mode{ 0.0f };     ///< 目标转速值(RPM/min)（速度模式）
+    alignas(64) std::atomic<Velocity_type> target_encoder_position_mode{ 0 };  ///< 目标编码器计数值（位置模式）
+    alignas(64) std::atomic<float> target_rpm_position_mode{ 0.0f };     ///< 目标转速值(RPM/min)（位置模式）
 
     // 协议常量（DS402标准）
     const uint16_t actual_Velocity_Index = OD_ACTUAL_VELOCITY;  ///< 0x606C
-    const uint16_t target_Velocity_Index = OD_TARGET_VELOCITY;  ///< 0x60FF
+    const uint16_t target_Velocity_Index_Velocity_Mode = OD_TARGET_VELOCITY_VELOCITY_MODE;  ///< 0x60FF
+    const uint16_t target_Velocity_Index_Position_Mode = OD_TARGET_VELOCITY_POSITION_MODE;  ///< 0x6081
+
 
     /**
      * @brief 检查待处理的数据类型
@@ -533,8 +610,8 @@ struct MotorVelocity {
  */
 struct MotorAccelDecel {
     // 数据存储区（复用模板）
-    AlignedRawData<2,uint16_t> raw_accel;  ///< 加速度值(单位RPM/min)  0x6083
-    AlignedRawData<2,uint16_t> raw_decel;  ///< 减速度值(单位RPM/min)  0x6084
+    AlignedRawData<2, AccelDecel_type> raw_accel;  ///< 加速度值(单位RPM/min)  0x6083
+    AlignedRawData<2, AccelDecel_type> raw_decel;  ///< 减速度值(单位RPM/min)  0x6084
 
     // 协议常量（DS402标准）
     const uint16_t accel_Index = OD_ACCELERATION;  ///< 0x6083
@@ -581,10 +658,6 @@ public:
 
     /**
      * @brief 电机类构造函数
-     *
-     * @param safeMode 是否启用安全模式（默认为true）
-     *                - true: 初始化时设置为零力矩模式
-     *                - false: 保留未初始化状态（危险！仅用于特殊场景）
      *
      * @note 构造时会自动调用init()方法完成以下初始化：
      * 1. 状态标志位清零
@@ -654,10 +727,14 @@ public:
 
         // 速度数据初始化
         velocity.flags_.store(0);
-        velocity.raw_target.atomicWriteValue(0);
-        velocity.raw_actual.atomicWriteValue(0);
+        //velocity.raw_target.atomicWriteValue(0);
+        velocity.raw_target_position_mode.atomicWriteValue(0);
+        velocity.raw_target_velocity_mode.atomicWriteValue(0);
+        //locity.raw_actual.atomicWriteValue(0);
         velocity.actual_rpm.store(0.0f);
-        velocity.target_rpm.store(0.0f);
+        velocity.target_encoder_position_mode.store(0);
+        velocity.target_encoder_velocity_mode.store(0);
+        //velocity.target_rpm.store(0.0f);
 
         // 加减速初始化
         const uint16_t default_accel = 0; // RPM/min
@@ -671,195 +748,184 @@ public:
 
 
     /**
-     * @brief 电机数据刷新方法（内部方法）
+     * @brief 电机数据刷新方法（优化版）
      * @tparam T 电机数据类型（MotorCurrent/MotorPosition/MotorVelocity）
      * @param data 要刷新的数据组引用
      *
      * @note 刷新逻辑：
-     * 1. 检查标志位确定数据流向（原始/编码器/物理值）
-     * 2. 自动执行必要的数值转换
-     * 3. 更新关联数据项
+     * 1. 检查标志位确定数据流向
+     * 2. 按优先级处理：接收优先于发送
+     * 3. 自动执行必要的数值转换
      * 4. 清除已处理的标志位
-     * 5. 一次只处理一个结构体（处理完数据就立刻刷新）
-     *
-     * @warning 必须在锁保护下调用
      */
     template <typename T>
     inline void refreshMotorData(T& data) {
-
-
         // 常量定义
         constexpr bool TO_ANGLE = true;
         constexpr bool TO_ENCODER = false;
-        constexpr float CURRENT_SCALE = 1.0f;  // 1count=1mA
-        constexpr float RPM_SCALE = 1.0f;      // 1count=1RPM
+        constexpr float CURRENT_SCALE = 1.0f;  // 1count = 1mA
+        constexpr float RPM_SCALE = 1.0f;      // 1count = 1RPM
 
-        
-
-        // "接收"原始数据需要刷新的情况  原始值→编码器值→物理值
+        // ========== 接收数据刷新（原始→编码器→物理） ==========
         if (data.needsProcess(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH)) {
-
-            //实际电流原始值需要刷新
             if constexpr (std::is_same_v<T, MotorCurrent>) {
                 // 电流：原始→编码器→物理值
-                int16_t raw_val;
-
-                raw_val = data.raw_actual.atomicReadValue();
-                //data.raw_actual.atomicRead(&raw_val); //从联合体里面读取十进制值
-
-                data.actual_encoder.store(raw_val);//编码器值写入读取值
-                data.actual_current.store(raw_val * CURRENT_SCALE); // 假设1个计数=1mA
-
-                data.markProcessed(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH);
-
-                return;
+                Current_type raw_val = data.raw_actual.atomicReadValue();
+                data.actual_encoder.store(raw_val, std::memory_order_release);
+                data.actual_current.store(raw_val * CURRENT_SCALE, std::memory_order_release);
             }
-
-            //实际位置原始值需要刷新
             else if constexpr (std::is_same_v<T, MotorPosition>) {
                 // 位置：原始→编码器→角度
-                int32_t raw_val;
-
-                raw_val = data.raw_actual.atomicReadValue();
-                //data.raw_actual.atomicRead(&raw_val);
-
-                data.actual_encoder.store(raw_val);//写入编码器
+                Position_type raw_val = data.raw_actual.atomicReadValue();
+                data.actual_encoder.store(raw_val, std::memory_order_release);
                 data.actual_degree.store(
-                    convertSensorAngle(raw_val, TO_ANGLE, SENSOR_RANGE));//编码器到角度
-
-                data.markProcessed(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH);
-
-                return;
+                    convertSensorAngle(raw_val, TO_ANGLE, SENSOR_RANGE),
+                    std::memory_order_release
+                );
             }
-
-            //实际速度原始值需要刷新
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
                 // 速度：原始→编码器→RPM
-                int16_t raw_val;
-
-                raw_val = data.raw_actual.atomicReadValue();
-                //data.raw_actual.atomicRead(&raw_val);
-
-                data.actual_encoder.store(raw_val);//写入编码器
-                data.actual_rpm.store(raw_val * RPM_SCALE); // 1计数=1RPM/min     写入角度
-
-                data.markProcessed(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH);//清空标志位
-
-                return;
+                Velocity_type raw_val = data.raw_actual.atomicReadValue();
+                data.actual_encoder.store(raw_val, std::memory_order_release);
+                data.actual_rpm.store(raw_val * RPM_SCALE, std::memory_order_release);
             }
+
+            data.markProcessed(T::Flags::RAW_DATA_RECEIVE_NEED_REFRESH);
+            return; // 一次只处理一种刷新
         }
 
-        // 检查编码器值接收标志（从编码器→原始&物理值）
+        // ========== 接收编码器刷新（编码器→原始&物理） ==========
         if (data.needsProcess(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH)) {
-
-            //实际电流编码器需要刷新
             if constexpr (std::is_same_v<T, MotorCurrent>) {
-                const int16_t enc_val = data.actual_encoder.load();
+                Current_type enc_val = data.actual_encoder.load(std::memory_order_acquire);
 
-                // 更新原始数据（使用valueToBytes）
-                uint8_t bytes[2];
-                valueToBytes(static_cast<int16_t>(enc_val), bytes, false);//编码器值 → 原始数据
-                data.raw_actual.bytes_[0] = bytes[0];
-                data.raw_actual.bytes_[1] = bytes[1];
+                // 更新原始数据
+                data.raw_actual.atomicWriteValue(enc_val);
 
-                // 更新物理值（电流值 = 编码器值）
-                data.actual_current.store(enc_val * CURRENT_SCALE); // 1计数=1mA      编码器值 → 物理值
-
-                data.markProcessed(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH);
-                return;
+                // 更新物理值
+                data.actual_current.store(enc_val * CURRENT_SCALE, std::memory_order_release);
             }
-
-            //实际位置编码器需要刷新
             else if constexpr (std::is_same_v<T, MotorPosition>) {
-                const int32_t enc_val = data.actual_encoder.load();
+                Position_type enc_val = data.actual_encoder.load(std::memory_order_acquire);
 
-                // 使用valueToBytes处理4字节数据
-                uint8_t bytes[4];
-                valueToBytes(enc_val, bytes, false);// 编码器值 → 原始值 
-                for (int i = 0; i < 4; ++i) { // 确保内存布局一致
-                    data.raw_actual.bytes_[i] = bytes[i];
-                }
+                // 更新原始数据
+                data.raw_actual.atomicWriteValue(enc_val);
 
                 // 更新角度物理值
                 data.actual_degree.store(
-                    convertSensorAngle(enc_val, TO_ANGLE));
-
-                data.markProcessed(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH);
-                return;
+                    convertSensorAngle(enc_val, TO_ANGLE, SENSOR_RANGE),
+                    std::memory_order_release
+                );
             }
-
-            //实际速度编码器需要刷新
             else if constexpr (std::is_same_v<T, MotorVelocity>) {
-                const int16_t enc_val = data.actual_encoder.load();
+                Velocity_type enc_val = data.actual_encoder.load(std::memory_order_acquire);
 
-                // 使用valueToBytes处理速度数据
-                uint8_t bytes[2];
-                valueToBytes(enc_val, bytes, false); // 编码器值 → 原始值 
-                for (int i = 0; i < 2; ++i) {
-                    data.raw_actual.bytes_[i] = bytes[i];
-                }
+                // 更新原始数据
+                data.raw_actual.atomicWriteValue(enc_val);
 
                 // 更新转速物理值
-                data.actual_rpm.store(enc_val * RPM_SCALE); // 1计数=1RPM
-
-                data.markProcessed(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH);
-                return;
+                data.actual_rpm.store(enc_val * RPM_SCALE, std::memory_order_release);
             }
+
+            data.markProcessed(T::Flags::ENCODER_DATA_RECEIVE_NEED_REFRESH);
+            return;
         }
 
-
-        // 检查发送数据标志（物理值→编码器值→原始值）
-        if (data.needsProcess(T::Flags::TARGET_DATA_SEND_NEED_REFRESH))
-        {
-
-            // 目标电流物理值发送处理
+        // ========== 实际物理值接收刷新（物理→编码器→原始） ==========
+        if (data.needsProcess(T::Flags::ACTUAL_DATA_RECEIVE_NEED_REFRESH)) {
             if constexpr (std::is_same_v<T, MotorCurrent>) {
-                // 物理值→编码器值（电流mA→整型计数）
-                const float target_current = data.target_current.load();
-                const int16_t enc_val = static_cast<int16_t>(target_current); // 1mA=1计数
-                data.target_encoder.store(enc_val);
+                float actual_val = data.actual_current.load(std::memory_order_acquire);
+                Current_type enc_val = static_cast<Current_type>(actual_val / CURRENT_SCALE);
 
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[2];
-                valueToBytes(static_cast<int16_t>(enc_val), bytes, false); // 小端模式
-                data.raw_target.bytes_[0] = bytes[0]; // LSB
-                data.raw_target.bytes_[1] = bytes[1]; // MSB
+                data.actual_encoder.store(enc_val, std::memory_order_release);
+                data.raw_actual.atomicWriteValue(enc_val);
+            }
+            else if constexpr (std::is_same_v<T, MotorPosition>) {
+                float actual_deg = data.actual_degree.load(std::memory_order_acquire);
+                Position_type enc_val = static_cast<Position_type>(
+                    convertSensorAngle(actual_deg, TO_ENCODER, SENSOR_RANGE)
+                    );
 
-                data.markProcessed(T::Flags::TARGET_DATA_SEND_NEED_REFRESH);
-                return;
+                data.actual_encoder.store(enc_val, std::memory_order_release);
+                data.raw_actual.atomicWriteValue(enc_val);
+            }
+            else if constexpr (std::is_same_v<T, MotorVelocity>) {
+                float actual_rpm = data.actual_rpm.load(std::memory_order_acquire);
+                Velocity_type enc_val = static_cast<Velocity_type>(actual_rpm / RPM_SCALE);
+
+                data.actual_encoder.store(enc_val, std::memory_order_release);
+                data.raw_actual.atomicWriteValue(enc_val);
             }
 
-            // 目标位置物理值发送处理
-            else if constexpr (std::is_same_v<T, MotorPosition>) {
-                // 物理值（角度）→编码器值
-                const float target_deg = data.target_degree.load();
-                const int32_t enc_val = static_cast<int32_t>(
-                    convertSensorAngle(target_deg, TO_ENCODER, SENSOR_RANGE));
-                data.target_encoder.store(enc_val);
+            data.markProcessed(T::Flags::ACTUAL_DATA_RECEIVE_NEED_REFRESH);
+            return;
+        }
 
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[4];
-                valueToBytes(enc_val, bytes, false); // 小端模式
-                for (int i = 0; i < 4; ++i) {
-                    data.raw_target.bytes_[i] = bytes[i]; // bytes[0]=LSB
+        // ========== 发送原始数据刷新（原始→编码器→物理） ==========
+        // 注意：MotorVelocity 使用特殊的标志位，所以这里只处理 Current 和 Position
+        if constexpr (!std::is_same_v<T, MotorVelocity>) {
+            if (data.needsProcess(T::Flags::RAW_DATA_SEND_NEED_REFRESH)) {
+                if constexpr (std::is_same_v<T, MotorCurrent>) {
+                    Current_type raw_val = data.raw_target.atomicReadValue();
+                    data.target_encoder.store(raw_val, std::memory_order_release);
+                    data.target_current.store(raw_val * CURRENT_SCALE, std::memory_order_release);
+                }
+                else if constexpr (std::is_same_v<T, MotorPosition>) {
+                    Position_type raw_val = data.raw_target.atomicReadValue();
+                    data.target_encoder.store(raw_val, std::memory_order_release);
+                    data.target_degree.store(
+                        convertSensorAngle(raw_val, TO_ANGLE, SENSOR_RANGE),
+                        std::memory_order_release
+                    );
                 }
 
-                data.markProcessed(T::Flags::TARGET_DATA_SEND_NEED_REFRESH);
+                data.markProcessed(T::Flags::RAW_DATA_SEND_NEED_REFRESH);
                 return;
             }
+        }
 
-            // 目标速度物理值发送处理
-            else if constexpr (std::is_same_v<T, MotorVelocity>) {
-                // 物理值（RPM）→编码器值
-                const float target_rpm = data.target_rpm.load();
-                const int16_t enc_val = static_cast<int16_t>(target_rpm * RPM_SCALE); // 1RPM=1计数
-                data.target_encoder.store(enc_val);
+        // ========== 发送编码器刷新（编码器→原始&物理） ==========
+        // 注意：MotorVelocity 使用特殊的标志位，所以这里只处理 Current 和 Position
+        if constexpr (!std::is_same_v<T, MotorVelocity>) {
+            if (data.needsProcess(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH)) {
+                if constexpr (std::is_same_v<T, MotorCurrent>) {
+                    Current_type enc_val = data.target_encoder.load(std::memory_order_acquire);
+                    data.raw_target.atomicWriteValue(enc_val);
+                    data.target_current.store(enc_val * CURRENT_SCALE, std::memory_order_release);
+                }
+                else if constexpr (std::is_same_v<T, MotorPosition>) {
+                    Position_type enc_val = data.target_encoder.load(std::memory_order_acquire);
+                    data.raw_target.atomicWriteValue(enc_val);
+                    data.target_degree.store(
+                        convertSensorAngle(enc_val, TO_ANGLE, SENSOR_RANGE),
+                        std::memory_order_release
+                    );
+                }
 
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[2];
-                valueToBytes(enc_val, bytes, false); // 小端模式
-                for (int i = 0; i < 2; ++i) {
-                    data.raw_target.bytes_[i] = bytes[i]; // bytes[0]=LSB
+                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+                return;
+            }
+        }
+
+        // ========== 发送物理值刷新（物理→编码器→原始） ==========
+        // 注意：MotorVelocity 使用特殊的标志位，所以这里只处理 Current 和 Position
+        if constexpr (!std::is_same_v<T, MotorVelocity>) {
+            if (data.needsProcess(T::Flags::TARGET_DATA_SEND_NEED_REFRESH)) {
+                if constexpr (std::is_same_v<T, MotorCurrent>) {
+                    float target_current = data.target_current.load(std::memory_order_acquire);
+                    Current_type enc_val = static_cast<Current_type>(target_current / CURRENT_SCALE);
+
+                    data.target_encoder.store(enc_val, std::memory_order_release);
+                    data.raw_target.atomicWriteValue(enc_val);
+                }
+                else if constexpr (std::is_same_v<T, MotorPosition>) {
+                    float target_deg = data.target_degree.load(std::memory_order_acquire);
+                    Position_type enc_val = static_cast<Position_type>(
+                        convertSensorAngle(target_deg, TO_ENCODER, SENSOR_RANGE)
+                        );
+
+                    data.target_encoder.store(enc_val, std::memory_order_release);
+                    data.raw_target.atomicWriteValue(enc_val);
                 }
 
                 data.markProcessed(T::Flags::TARGET_DATA_SEND_NEED_REFRESH);
@@ -867,71 +933,84 @@ public:
             }
         }
 
-
-        // 检查发送数据标志（从编码器值→原始值&物理值）
-        if (data.needsProcess(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH)) {
-
-            // 目标电流编码器发送处理（1编码器值=1mA）
-            if constexpr (std::is_same_v<T, MotorCurrent>) {
-                const int32_t enc_val = data.target_encoder.load();
-
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[2];
-                valueToBytes(static_cast<int16_t>(enc_val), bytes, false); // 小端模式
-                data.raw_target.bytes_[0] = bytes[0]; // LSB
-                data.raw_target.bytes_[1] = bytes[1]; // MSB
-
-                // 编码器值→物理值（1:1映射）
-                data.target_current.store(static_cast<float>(enc_val)); // 直接转为mA
-
-                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+        // ========== 速度特殊处理（两种模式） ==========
+        if constexpr (std::is_same_v<T, MotorVelocity>) {
+            // 速度模式发送处理
+            if (data.needsProcess(T::Flags::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE)) {
+                Velocity_type raw_val = data.raw_target_velocity_mode.atomicReadValue();
+                data.target_encoder_velocity_mode.store(raw_val, std::memory_order_release);
+                data.target_rpm_velocity_mode.store(raw_val * RPM_SCALE, std::memory_order_release);
+                data.markProcessed(T::Flags::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE);
                 return;
             }
 
-            // 目标位置编码器发送处理
-            else if constexpr (std::is_same_v<T, MotorPosition>) {
-                const int32_t enc_val = data.target_encoder.load();
-
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[4];
-                valueToBytes(enc_val, bytes, false); // 小端模式
-                for (int i = 0; i < 4; ++i) {
-                    data.raw_target.bytes_[i] = bytes[i]; // bytes[0]=LSB
-                }
-
-                // 编码器值→物理角度（使用转换函数）
-                data.target_degree.store(
-                    convertSensorAngle(enc_val, true));
-
-                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+            if (data.needsProcess(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH_VELOCITY_MODE)) {
+                Velocity_type enc_val = data.target_encoder_velocity_mode.load(std::memory_order_acquire);
+                data.raw_target_velocity_mode.atomicWriteValue(enc_val);
+                data.target_rpm_velocity_mode.store(enc_val * RPM_SCALE, std::memory_order_release);
+                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH_VELOCITY_MODE);
                 return;
             }
 
-            // 目标速度编码器发送处理（1编码器值=1RPM）
-            else if constexpr (std::is_same_v<T, MotorVelocity>) {
-                const int16_t enc_val = data.target_encoder.load();
+            if (data.needsProcess(T::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE)) {
+                float target_rpm = data.target_rpm_velocity_mode.load(std::memory_order_acquire);
+                Velocity_type enc_val = static_cast<Velocity_type>(target_rpm / RPM_SCALE);
+                data.target_encoder_velocity_mode.store(enc_val, std::memory_order_release);
+                data.raw_target_velocity_mode.atomicWriteValue(enc_val);
+                data.markProcessed(T::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE);
+                return;
+            }
 
-                // 编码器值→原始数据（小端序）
-                uint8_t bytes[2];
-                valueToBytes(enc_val, bytes, false); // 小端模式
-                for (int i = 0; i < 2; ++i) {
-                    data.raw_target.bytes_[i] = bytes[i]; // bytes[0]=LSB
-                }
+            // 位置模式发送处理
+            if (data.needsProcess(T::Flags::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE)) {
+                Velocity_type raw_val = data.raw_target_position_mode.atomicReadValue();
+                data.target_encoder_position_mode.store(raw_val, std::memory_order_release);
+                data.target_rpm_position_mode.store(raw_val * RPM_SCALE, std::memory_order_release);
+                data.markProcessed(T::Flags::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE);
+                return;
+            }
 
-                // 编码器值→物理值（1:1映射）
-                data.target_rpm.store(static_cast<float>(enc_val)); // 直接转为RPM
+            if (data.needsProcess(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH_POSITION_MODE)) {
+                Velocity_type enc_val = data.target_encoder_position_mode.load(std::memory_order_acquire);
+                data.raw_target_position_mode.atomicWriteValue(enc_val);
+                data.target_rpm_position_mode.store(enc_val * RPM_SCALE, std::memory_order_release);
+                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH_POSITION_MODE);
+                return;
+            }
 
-                data.markProcessed(T::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+            if (data.needsProcess(T::Flags::TARGET_DATA_SEND_NEED_REFRESH_POSITION_MODE)) {
+                float target_rpm = data.target_rpm_position_mode.load(std::memory_order_acquire);
+                Velocity_type enc_val = static_cast<Velocity_type>(target_rpm / RPM_SCALE);
+                data.target_encoder_position_mode.store(enc_val, std::memory_order_release);
+                data.raw_target_position_mode.atomicWriteValue(enc_val);
+                data.markProcessed(T::Flags::TARGET_DATA_SEND_NEED_REFRESH_POSITION_MODE);
                 return;
             }
         }
+    }
 
+    /**
+     * @brief 批量刷新所有电机数据
+     * @note 用于接收线程和规划线程调用
+     */
+    void refreshAllMotorData() {
+        // 无需加锁，各数据结构已经是原子操作
+        refreshMotorData(current);
+        refreshMotorData(position);
+        refreshMotorData(velocity);
+        // 加减速不需要刷新
+    }
 
-
-
-        };
-
-
+    /**
+     * @brief 设置标志位（线程安全）
+     * @tparam T 数据类型
+     * @param data 数据结构引用
+     * @param flag 要设置的标志位
+     */
+    template <typename T>
+    inline void setRefreshFlag(T& data, typename T::Flags flag) {
+        data.flags_.fetch_or(flag, std::memory_order_release);
+    }
 
 };
 #endif // CLASS_MOTOR_HPP

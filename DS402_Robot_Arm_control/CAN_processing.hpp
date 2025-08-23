@@ -1,4 +1,50 @@
-﻿#ifndef CAN_PROCESSING_HPP
+﻿/**
+ * @file CAN_processing.hpp
+ * @brief 实现CAN帧解析和电机状态更新的核心处理逻辑
+ *
+ * @details 本文件提供了机械臂驱动程序的CAN通信协议栈解析模块，
+ * 负责对接收自串口转CAN芯片的特殊格式CAN帧进行识别、分类和处理。
+ * 该模块支持完整的CANopen协议帧类型，包括NMT、SYNC、SDO和PDO，
+ * 并通过PDO映射机制实现电机状态数据的高效更新。
+ *
+ * 主要功能包括：
+ * - 解析特殊格式的CAN帧并识别协议类型
+ * - 分发不同类型CAN帧到对应的处理函数
+ * - 实现PDO数据帧的自动映射和电机状态更新
+ * - 提供线程安全的电机数据写入机制
+ * - 支持多电机系统的批量数据处理
+ *
+ * @note 该模块专为串口转CAN芯片的特殊帧格式设计，保持与硬件的
+ * 紧密耦合。所有处理函数均采用内联优化，确保2ms实时同步周期内
+ * 完成数据处理。电机数据访问通过互斥锁保护，PDO处理支持原子化
+ * 标志位操作。
+ *
+ * @par 协议支持：
+ * - NMT网络管理帧：设备控制和状态监控
+ * - SYNC同步帧：系统时钟同步信号
+ * - SDO服务数据对象：参数配置和诊断通信
+ * - PDO过程数据对象：实时数据交换（RPDO/TPDO）
+ *
+ * @par 处理流程：
+ * 1. CAN帧接收 → 2. 协议类型识别 → 3. 分发到专用处理器
+ * 4. PDO数据映射 → 5. 电机状态更新 → 6. 触发数据刷新
+ *
+ * @par 线程安全性：
+ * - 每个电机对象独立加锁，避免全局锁竞争
+ * - PDO映射表只读访问，支持多线程并发查询
+ * - 原子标志位操作确保刷新状态的一致性
+ */
+
+
+
+
+
+
+
+
+
+
+#ifndef CAN_PROCESSING_HPP
 #define CAN_PROCESSING_HPP
 
 
@@ -298,12 +344,22 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
                         std::memory_order_relaxed);
                     break;
 
-                case OD_TARGET_VELOCITY: // 0x60FF 目标速度（发送）
-                    targetMotor.velocity.raw_target.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.velocity.raw_target.bytes_[1] = data[entry.offsetInPdo + 1];
+                case OD_TARGET_VELOCITY_VELOCITY_MODE: // 0x60FF 目标速度（速度模式发送）
+                    targetMotor.velocity.raw_target_velocity_mode.bytes_[0] = data[entry.offsetInPdo];
+                    targetMotor.velocity.raw_target_velocity_mode.bytes_[1] = data[entry.offsetInPdo + 1];
                     targetMotor.velocity.flags_.store(
                         targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
-                        MotorVelocity::RAW_DATA_SEND_NEED_REFRESH,
+                        MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE,
+                        std::memory_order_relaxed);
+                    break;
+
+
+                case OD_TARGET_VELOCITY_POSITION_MODE: // 0x6081 目标速度（位置模式发送）
+                    targetMotor.velocity.raw_target_position_mode.bytes_[0] = data[entry.offsetInPdo];
+                    targetMotor.velocity.raw_target_position_mode.bytes_[1] = data[entry.offsetInPdo + 1];
+                    targetMotor.velocity.flags_.store(
+                        targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
+                        MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE,
                         std::memory_order_relaxed);
                     break;
 

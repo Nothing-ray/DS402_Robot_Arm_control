@@ -3,21 +3,87 @@
   - add -D_WIN32_WINNT=0x0601 to the compiler command line; or
   - add _WIN32_WINNT=0x0601 to your project's Preprocessor Definitions.
   Assuming _WIN32_WINNT=0x0601 (i.e. Windows 7 target).
-F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(728,39): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(118,23): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(118,23): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(118,23): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(118,23): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(118,23): warning C4244:         ]
   (编译源文件“main.cpp”)
-      F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(728,39):
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(202,23): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(202,23): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(202,23): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(202,23): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(202,23): warning C4244:         ]
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(230,25): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(230,25): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(230,25): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(230,25): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(230,25): warning C4244:         ]
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(266,26): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(266,26): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(266,26): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(266,26): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(266,26): warning C4244:         ]
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(319,32): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(319,32): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(319,32): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(319,32): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(319,32): warning C4244:         ]
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(371,31): warning C4244: “初始化”: 从“_Rep”转换到“long”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(371,31): warning C4244:         with
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(371,31): warning C4244:         [
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(371,31): warning C4244:             _Rep=__int64
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(371,31): warning C4244:         ]
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(795,31): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(805,31): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(933,36): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(934,35): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(955,21): warning C4244: “初始化”: 从“float”转换到“int32_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(957,21): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\Test_module.hpp(958,21): warning C4244: “初始化”: 从“float”转换到“int16_t”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(782,39): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
+  (编译源文件“main.cpp”)
+      F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(782,39):
       模板实例化上下文(最早的实例化上下文)为
-          F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CAN_processing.hpp(331,17):
+          F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(999,9):
           查看对正在编译的函数 模板 实例化“void Motor::refreshMotorData<MotorPosition>(T &)”的引用
           with
           [
               T=MotorPosition
           ]
   
-F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(785,39): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(816,39): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
   (编译源文件“main.cpp”)
   
-F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(904,39): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(877,43): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
+  (编译源文件“main.cpp”)
+  
+F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\CLASS_Motor.hpp(900,43): warning C4244: “参数”: 从“double”转换到“const float”，可能丢失数据
   (编译源文件“main.cpp”)
   
   DS402_Robot_Arm_control.vcxproj -> F:\刀客塔\第二代手臂通信\DS402_Robot_Arm_control\DS402_Robot_Arm_control\x64\Debug\DS402_Robot_Arm_control.exe

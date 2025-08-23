@@ -1,4 +1,42 @@
-﻿#pragma once
+﻿/**
+ * @file PDO_config.hpp
+ * @brief 定义CANopen PDO映射配置和COB-ID转换工具
+ *
+ * @details 本文件实现了机械臂驱动程序的PDO（Process Data Object）配置管理模块，
+ * 提供运行时PDO映射表的构建机制和CANopen通信对象标识符的转换功能。该设计支持
+ * 多电机系统的批量配置，通过模板化映射条目实现配置的灵活性和可扩展性。
+ *
+ * 主要功能包括：
+ * - 定义PDO映射条目模板和运行时映射表结构
+ * - 提供基于电机数量的批量PDO映射表构建函数
+ * - 实现SDO和PDO通信对象标识符的标准化转换
+ * - 支持RPDO（接收PDO）和TPDO（发送PDO）的双向映射配置
+ * - 为多机械臂系统提供可扩展的配置管理接口
+ *
+ * @note 该模块采用编译期模板定义与运行时动态构建相结合的方式，
+ * 既保证了配置的灵活性，又提供了良好的性能表现。COB-ID转换遵循
+ * CANopen标准规范，支持最多12个电机节点的配置。
+ *
+ * @par 设计特点：
+ * - 使用宏定义简化PDO映射条目的声明
+ * - 通过offsetof运算符实现Motor类成员的高效访问
+ * - 采用预分配内存策略优化映射表构建性能
+ * - 支持1-based电机编号规范，符合工业设备惯例
+ * - 提供异常安全的COB-ID转换接口
+ *
+ * @par 扩展性说明：
+ * - 易于添加新的PDO映射条目和配置模板
+ * - 支持不同机械臂配置的独立映射表管理
+ * - 可适配不同厂商电机的PDO映射需求
+ */
+
+
+
+
+
+
+
+#pragma once
 #ifndef PDO_CONFIG_HPP
 #define PDO_CONFIG_HPP
 
@@ -30,21 +68,25 @@
 /*  RPDO: 上位机→下位机   TPDO:下位机→上位机  */
 
 // RPDO1 配置 (0x200 + NodeID)
+// 0-4 目标位置  4-6 控制字
 #define RPDO1_MAPPINGS \
     MAP_ENTRY(RPDO, 1, OD_TARGET_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_actual)) \
     MAP_ENTRY(RPDO, 1, OD_CONTROL_WORD,    0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.statusWordRaw))
 
 // RPDO2 配置 (0x300 + NodeID)
+// 0-2 目标速度 2-4 目标电流
 #define RPDO2_MAPPINGS \
-    MAP_ENTRY(RPDO, 2, OD_TARGET_VELOCITY, 0x00, 0, 2, offsetof(Motor, velocity.raw_target)) \
+    MAP_ENTRY(RPDO, 2, OD_TARGET_VELOCITY_VELOCITY_MODE, 0x00, 0, 2, offsetof(Motor, velocity.raw_target_position_mode)) \
     MAP_ENTRY(RPDO, 2, OD_TARGET_CURRENT,  0x00, 2, 2, offsetof(Motor, current.raw_target))
 
 // TPDO1 配置 (0x180 + NodeID)
+// 0-4 实际位置  4-6状态字
 #define TPDO1_MAPPINGS \
     MAP_ENTRY(TPDO,  1, OD_ACTUAL_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_actual)) \
     MAP_ENTRY(TPDO,  1, OD_STATUS_WORD,     0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.statusWordRaw))
 
 // TPDO2 配置 (0x280 + NodeID)
+// 0-2 实际速度 2-4实际电流
 #define TPDO2_MAPPINGS \
     MAP_ENTRY(TPDO,  2, OD_ACTUAL_VELOCITY, 0x00, 0, 2, offsetof(Motor, velocity.raw_actual)) \
     MAP_ENTRY(TPDO,  2, OD_ACTUAL_CURRENT,  0x00, 2, 2, offsetof(Motor, current.raw_actual))

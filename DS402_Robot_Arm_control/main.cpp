@@ -27,7 +27,21 @@ int main(){
 
 	std::locale::global(std::locale(""));  // 使用系统默认locale
 	std::wcout.imbue(std::locale());
-	testCANProcessing();
+
+
+	/*  
+         //电机类测试
+        // 创建电机实例数组   
+    std::array<Motor, 6> motors = {
+        Motor(1), Motor(2), Motor(3),
+        Motor(4), Motor(5), Motor(6)
+    };
+
+    // 执行测试
+    testMotorClass(motors);
+    */
+
+    testTPDOProcessing();
 
 
 	return 0;

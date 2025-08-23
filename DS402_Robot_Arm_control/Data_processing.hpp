@@ -26,17 +26,18 @@
 
 
 /**
- * @brief 编码器值与角度值的双向转换函数
+ * @brief 编码器值与角度值的双向转换函数（支持对称范围）
  *
  * @param value 输入值
- * @param sensorRange 编码器量程（默认32768）
  * @param toAngle true表示编码器→角度，false表示角度→编码器
+ * @param sensorRange 编码器量程（默认32768）
  * @param decimalPlaces 保留小数位数（默认2位，仅toAngle=true有效）
  * @param round 是否四舍五入（默认true）
  * @return double 转换结果
  *
- * @note 角度→编码器转换时，返回值会截断为整数
- * @warning 角度输入超过360度时会自动取模
+ * @note 1. 编码器范围: -32767到32768对应-180度到180度
+ *       2. 角度→编码器转换时，返回值会截断为整数
+ *       3. 角度输入会自动归一化到[-180,180]范围
  */
 inline double convertSensorAngle(
     double value,
@@ -45,12 +46,11 @@ inline double convertSensorAngle(
     int decimalPlaces = 2,
     bool round = true
 ) {
-    const double scale = 360.0 / sensorRange;
-
+    const double scale = 180.0 / sensorRange;
     if (toAngle) {
         // 编码器→角度转换
         double result = value * scale;
-
+        // 处理小数位数
         if (decimalPlaces >= 0) {
             const double factor = std::pow(10.0, decimalPlaces);
             return round ?
@@ -61,10 +61,21 @@ inline double convertSensorAngle(
     }
     else {
         // 角度→编码器转换
+        // 归一化角度到[-180,180]范围
         double normalizedAngle = std::fmod(value, 360.0);
-        if (normalizedAngle < 0) normalizedAngle += 360.0;
-
+        if (normalizedAngle > 180.0) {
+            normalizedAngle -= 360.0;
+        }
+        else if (normalizedAngle < -180.0) {
+            normalizedAngle += 360.0;
+        }
+        // 计算编码器值
         double sensorValue = normalizedAngle / scale;
+
+        // 确保不超出编码器范围
+        sensorValue = std::max(sensorValue, static_cast<double>(-sensorRange));
+        sensorValue = std::min(sensorValue, static_cast<double>(sensorRange));
+
         return round ?
             std::round(sensorValue) :
             std::floor(sensorValue);
@@ -229,7 +240,8 @@ inline void PrintCANbinaryData(const std::vector<uint8_t>& binaryData)
     return;
 }
 
- 
+
+
 
 
 
