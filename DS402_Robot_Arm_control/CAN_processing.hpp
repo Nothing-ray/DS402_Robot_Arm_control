@@ -103,6 +103,11 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
         handleNodeStatus(nodeId, data[0]);
     }
     else if ((id >= 0x0601) && (id <= 0x067F)) {
+        
+        
+        //从设计上，作为上位机不需要处理命令报文，上位机负责发出命令，为了保证功能的完整性，这里实现部分留空
+        
+        
         // SDO命令报文
         uint8_t nodeId = id - 0x0600;
         handleSdoCommand(nodeId, data, dlc);
@@ -113,6 +118,10 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
         handleSdoResponse(nodeId, data, dlc);
     }
     else {
+
+
+
+
         // PDO帧处理逻辑合并
         if ((id >= 0x0201 && id <= 0x027F) ||  // RPDO1
             (id >= 0x0301 && id <= 0x037F) ||  // RPDO2
@@ -161,7 +170,10 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
             //执行PDO的处理
             ProcessPDO(nodeId, pdoNum, isTx, data, dlc, motors, pdoTable);
 
-        }
+        }//PDO处理逻辑结束
+
+
+
 
 
         else {

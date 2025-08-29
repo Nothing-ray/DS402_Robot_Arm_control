@@ -71,10 +71,10 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>F:\刀客塔\第二代手臂通信\boost_1_86_0;F:\刀客塔\第二代手臂通信\boost_1_86_0;$(IncludePath)</IncludePath>
+    <IncludePath>F:\刀客塔\工程和任务\第二代手臂通信\boost_1_86_0;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>F:\刀客塔\第二代手臂通信\boost_1_86_0;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+    <IncludePath>F:\刀客塔\工程和任务\第二代手臂通信\boost_1_86_0;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -126,6 +126,8 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -140,6 +142,8 @@
     <ClInclude Include="CLASS_Motor.hpp" />
     <ClInclude Include="Data_processing.hpp" />
     <ClInclude Include="PDO_config.hpp" />
+    <ClInclude Include="SDO_State_Machine.hpp" />
+    <ClInclude Include="Send_Thread.hpp" />
     <ClInclude Include="Test_module.hpp" />
   </ItemGroup>
   <ItemGroup>

@@ -41,8 +41,8 @@ int main(){
     testMotorClass(motors);
     */
 
-    testTPDOProcessing();
-
+    //testTPDOProcessing();
+    testSDOStateMachineMultiThreadPerformance();
 
 	return 0;
 }
