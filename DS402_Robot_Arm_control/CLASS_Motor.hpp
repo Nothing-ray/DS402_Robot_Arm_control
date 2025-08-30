@@ -81,7 +81,7 @@ using AccelDecel_type = uint16_t; //专用于处理加减速度
  *
  * @details 本模板提供：
  * 1. 保证64字节缓存行对齐（ARM64/X86优化）
- * 2. 类型双关(Type Punning)安全实现
+ * 2. 真正的原子操作保证多线程安全
  * 3. 跨平台原子操作封装
  * 4. 多线程安全访问保障
  *
@@ -105,107 +105,115 @@ struct alignas(64) AlignedRawData {
         (!std::is_void_v<T> && sizeof(T) == N && std::is_trivially_copyable_v<T>),
         "Invalid user-specified type");
 
+    // 定义原子存储类型
+    using AtomicType = std::conditional_t<std::is_void_v<T>,
+        std::conditional_t<N == 1, std::atomic<uint8_t>,
+        std::conditional_t<N == 2, std::atomic<uint16_t>,
+        std::conditional_t<N == 4, std::atomic<uint32_t>,
+        std::atomic<uint64_t>>>>,
+        std::atomic<T>>;
 
-    /**
-     * @brief 匿名联合体实现安全类型双关
-     * @details 通过联合体实现两种数据视图：
-     * - 原始字节序列：用于协议栈/DMA直接访问
-     * - 类型化视图：用于业务逻辑操作
-     */
-    union {
-        volatile uint8_t bytes_[N];  ///< 原始字节视图（内存连续，支持memcpy）
-        std::conditional_t<std::is_same_v<T, void>,
-            std::conditional_t<N == 1, int8_t,      ///< N=1默认int8_t
-            std::conditional_t<N == 2, int16_t, ///< N=2默认int16_t
-            std::conditional_t<N == 4, int32_t, ///< N=4默认int32_t
-            int64_t>>>, ///< N=8默认int64_t
-            T> value_;  ///< 用户指定类型视图（需确保sizeof(T)==N）
-    };
+    using ValueType = typename AtomicType::value_type;
+
+    // 核心原子存储
+    mutable AtomicType atomic_value_{0};
 
     /// 缓存行填充（ARM64为64字节）
-    uint8_t padding_[64 - N];
+    uint8_t padding_[64 - sizeof(AtomicType)];
 
     // ====================== 原子操作接口 ====================== //
 
+    /**
+     * @brief 原子写入数据（Release语义）
+     * @tparam U 数据类型（自动推导）
+     * @param buf 输入数据指针
+     *
+     * @note 技术特性：
+     * 1. 使用std::memory_order_release保证写入可见性
+     * 2. 静态检查类型大小匹配和可平凡复制性
+     * 3. 真正的原子操作，无竞争条件
+     *
+     * @warning 必须遵循：
+     * - buf必须是有效指针
+     * - 类型大小必须匹配
+     *
+     * @example 写入uint16_t值：
+     * @code
+     * uint16_t val = 0x1234;
+     * data.atomicWrite(&val);
+     * @endcode
+     */
+    template <typename U>
+    void atomicWrite(const U* buf) noexcept {
+        static_assert(sizeof(U) == N, "Type size mismatch");
+        static_assert(std::is_trivially_copyable_v<U>,
+            "Type must be trivially copyable");
 
+        ValueType value;
+        std::memcpy(&value, buf, sizeof(U));
+        atomic_value_.store(value, std::memory_order_release);
+    }
 
-        /**
-         * @brief 原子写入数据（Release语义）
-         * @tparam U 数据类型（自动推导）
-         * @param buf 输入数据指针
-         *
-         * @note 技术特性：
-         * 1. 使用std::memory_order_release保证写入可见性
-         * 2. 静态检查类型大小匹配和可平凡复制性
-         * 3. 通过void*中转避免strict-aliasing警告
-         *
-         * @warning 必须遵循：
-         * - buf必须是有效指针
-         * - 禁止与非原子操作混用
-         *
-         * @example 写入uint32_t值：
-         * @code
-         * uint32_t val = 0x12345678;
-         * data.atomicWrite(&val);
-         * @endcode
-         */
-        template <typename U>
-        void atomicWrite(const U* buf) noexcept {
-            static_assert(sizeof(U) == N, "Type size mismatch");
-            static_assert(std::is_trivially_copyable_v<U>,
-                "Type must be trivially copyable");
+    void atomicWriteValue(ValueType val) noexcept {
+        atomic_value_.store(val, std::memory_order_release);
+    }
 
-            std::memcpy(const_cast<void*>(static_cast<const void*>(&value_)),
-                static_cast<const void*>(buf),
-                sizeof(U));
-        }
+    /**
+     * @brief 原子读取数据（Acquire语义）
+     * @tparam U 目标数据类型
+     * @param[out] buf 输出缓冲区指针
+     *
+     * @note 内存序保证：
+     * - 确保读取前的所有写入操作对当前线程可见
+     * - 适合状态机等需要强一致性的场景
+     *
+     * @warning 缓冲区必须预先分配且大小匹配
+     *
+     * @example 读取到int16_t变量：
+     * @code
+     * int16_t result;
+     * data.atomicRead(&result);
+     * @endcode
+     */
+    template <typename U>
+    void atomicRead(U* buf) const noexcept {
+        static_assert(sizeof(U) == N, "Type size mismatch");
+        static_assert(std::is_trivially_copyable_v<U>,
+            "Type must be trivially copyable");
 
-        void atomicWriteValue(decltype(value_) val) noexcept {
-            atomicWrite(&val);
-        }
+        ValueType value = atomic_value_.load(std::memory_order_acquire);
+        std::memcpy(buf, &value, sizeof(U));
+    }
 
-        /**
-         * @brief 原子读取数据（Acquire语义）
-         * @tparam U 目标数据类型
-         * @param[out] buf 输出缓冲区指针
-         *
-         * @note 内存序保证：
-         * - 确保读取前的所有写入操作对当前线程可见
-         * - 适合状态机等需要强一致性的场景
-         *
-         * @warning 缓冲区必须预先分配且大小匹配
-         *
-         * @example 读取到int32_t变量：
-         * @code
-         * int32_t result;
-         * data.atomicRead(&result);
-         * @endcode
-         */
-        template <typename U>
-        void atomicRead(U* buf) const noexcept {
-            static_assert(sizeof(U) == N, "Type size mismatch");
-            static_assert(std::is_trivially_copyable_v<U>,
-                "Type must be trivially copyable");
+    ValueType atomicReadValue() const noexcept {
+        return atomic_value_.load(std::memory_order_acquire);
+    }
 
-            
-                std::memcpy(static_cast<void*>(buf),
-                    static_cast<const void*>(&value_),
-                    sizeof(U));
-        }
+    /**
+     * @brief 获取字节数组（线程安全）
+     * @param[out] bytes 输出字节数组，必须至少N字节
+     */
+    void getBytes(uint8_t* bytes) const noexcept {
+        ValueType value = atomic_value_.load(std::memory_order_acquire);
+        std::memcpy(bytes, &value, N);
+    }
 
+    /**
+     * @brief 设置字节数组（线程安全）
+     * @param[in] bytes 输入字节数组，必须至少N字节
+     */
+    void setBytes(const uint8_t* bytes) noexcept {
+        ValueType value;
+        std::memcpy(&value, bytes, N);
+        atomic_value_.store(value, std::memory_order_release);
+    }
 
-        decltype(value_) atomicReadValue() const noexcept {
-            decltype(value_) val;
-            atomicRead(&val);
-            return val;
-        }
-
-        //=== 防误用设计 ===//
-        AlignedRawData() = default;
-        ~AlignedRawData() = default; 
-        AlignedRawData(const AlignedRawData&) = delete;
-        AlignedRawData& operator=(const AlignedRawData&) = delete;
-    };
+    //=== 防误用设计 ===//
+    AlignedRawData() = default;
+    ~AlignedRawData() = default; 
+    AlignedRawData(const AlignedRawData&) = delete;
+    AlignedRawData& operator=(const AlignedRawData&) = delete;
+};
 
 
 // 编译时校验
@@ -712,8 +720,9 @@ public:
         current.raw_actual.atomicWriteValue(0);
         current.raw_target.atomicWriteValue(0);
         
-
+        current.actual_encoder.store(0);
         current.actual_current.store(0.0f);
+        current.target_encoder.store(0);
         current.target_current.store(0.0f);
         
 
@@ -721,20 +730,23 @@ public:
         position.flags_.store(0);
         position.raw_actual.atomicWriteValue(0);
         position.raw_target.atomicWriteValue(0);
+        position.actual_encoder.store(0);
         position.actual_degree.store(0.0f);
+        position.target_encoder.store(0);
         position.target_degree.store(0.0f);
         
 
         // 速度数据初始化
         velocity.flags_.store(0);
-        //velocity.raw_target.atomicWriteValue(0);
+        velocity.raw_actual.atomicWriteValue(0);
         velocity.raw_target_position_mode.atomicWriteValue(0);
         velocity.raw_target_velocity_mode.atomicWriteValue(0);
-        //locity.raw_actual.atomicWriteValue(0);
+        velocity.actual_encoder.store(0);
         velocity.actual_rpm.store(0.0f);
         velocity.target_encoder_position_mode.store(0);
         velocity.target_encoder_velocity_mode.store(0);
-        //velocity.target_rpm.store(0.0f);
+        velocity.target_rpm_position_mode.store(0.0f);
+        velocity.target_rpm_velocity_mode.store(0.0f);
 
         // 加减速初始化
         const uint16_t default_accel = 0; // RPM/min

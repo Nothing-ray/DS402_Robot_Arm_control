@@ -62,7 +62,7 @@
 /// @brief SDO通信超时时间定义（微秒）
 /// @details 根据CANopen标准和实时性要求设置的默认超时值
 /// @note 可根据具体网络环境和性能要求调整
-#define TIME_OUT_US 500  // 超时时间500微秒
+#define TIME_OUT_US 2000  // 超时时间(微秒)
 
 /// @brief SDO重试机制配置
 #define MAX_RETRY_COUNT 3  // 最大重试次数（2-3次）
@@ -200,7 +200,7 @@ namespace canopen {
     class AtomicSdoStateMachine {
     public:
         /**
-         * @brief 准备SDO事务
+         * @brief 准备SDO事务 将CAN帧注册到SDO事务的各个变量以便处理
          * @param frame CAN帧数据
          * @return 初始化好的SDO事务对象
          * 
@@ -266,7 +266,7 @@ namespace canopen {
         }
 
         /**
-         * @brief 开始SDO事务（内存栅栏保护）
+         * @brief 开始SDO事务（内存栅栏保护） 归零重试计数器
          * @param transaction 要开始的事务对象引用
          * @return 是否成功开始事务
          * 
@@ -294,7 +294,8 @@ namespace canopen {
                 transaction.retry_count.store(0, std::memory_order_release);
                 
                 // 使用shared_ptr保证对象生命周期安全
-                // 通过std::shared_ptr的aliasing constructor共享所有权
+                // 通过std::shared_ptr的aliasing constructor共享所有权 
+                //对处理当前事务的智能指针初始化
                 current_transaction_ = std::shared_ptr<SdoTransaction>(
                     std::shared_ptr<SdoTransaction>{}, &transaction);
                 
@@ -308,7 +309,7 @@ namespace canopen {
         }
 
         /**
-         * @brief 处理SDO响应（内存栅栏保护）
+         * @brief 处理SDO响应（内存栅栏保护） 接收线程专用
          * @param response_data 响应数据数组指针
          * @param dlc 数据长度（字节数）
          * @param node_id 节点ID
@@ -400,7 +401,7 @@ namespace canopen {
          * @note 使用lambda捕获shared_ptr副本防止竞争条件
          * @warning 只有在事务存在且状态正确时才返回true
          */
-        bool waitForResponse(uint32_t timeout_us = TIME_OUT_US) {
+        inline bool waitForResponse(uint32_t timeout_us = TIME_OUT_US) {
             std::unique_lock<std::mutex> lock(mutex_);
 
             // 获取shared_ptr副本用于lambda捕获
@@ -425,7 +426,7 @@ namespace canopen {
         }
 
         /**
-         * @brief 检查超时并处理重试逻辑
+         * @brief 检查超时并处理重试逻辑 将事务开始时间和当前时间相减来判断超时
          * @return 是否发生超时或需要重试
          * 
          * @details 增强的超时检查，支持自动重试机制
@@ -436,11 +437,13 @@ namespace canopen {
          * @throws std::runtime_error 当超过最大重试次数时
          * @note 重试成功后计数器会在收到响应时清零
          */
-        bool checkTimeout() {
+        inline bool checkTimeout() {
             std::lock_guard<std::mutex> lock(mutex_);
 
             // 使用shared_ptr安全获取当前事务引用
             auto transaction_ptr = current_transaction_;
+
+            //如果为空指针或者状态机不在等待状态则返回为错误
             if (!transaction_ptr ||
                 transaction_ptr->state.load(std::memory_order_acquire) != SdoState::WAITING_RESPONSE) {
                 return false;
@@ -448,11 +451,14 @@ namespace canopen {
 
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                now - start_time_).count();
+                now - start_time_).count();//通过将当前时间和事务开始时间相减来判断是否超时
 
             if (elapsed >= TIME_OUT_US) {
+
+                //获取重试次数
                 uint8_t current_retry = transaction_ptr->retry_count.load(std::memory_order_acquire);
                 
+                //还有重试机会的情况
                 if (current_retry < MAX_RETRY_COUNT) {
                     // 还可以重试，增加计数器并设置重试状态
                     transaction_ptr->retry_count.fetch_add(1, std::memory_order_acq_rel);
@@ -507,7 +513,7 @@ namespace canopen {
          * 
          * @note 此方法应在发送线程中调用以处理重试逻辑
          */
-        bool needsRetry() {
+        inline bool needsRetry() {
             std::lock_guard<std::mutex> lock(mutex_);
             auto transaction_ptr = current_transaction_;
             if (!transaction_ptr) return false;
@@ -691,7 +697,7 @@ namespace canopen {
          * @note 移除了不必要的内存栅栏，因为参数是局部变量
          * @warning 命令字节必须来自有效的SDO帧数据
          */
-        SdoResponseType classifyResponse(uint8_t command) const {
+        inline SdoResponseType classifyResponse(uint8_t command) const {
             // 检查错误响应 - 高四位为0x8
             if ((command & 0xF0) == 0x80) {
                 return SdoResponseType::ERROR_RESPONSE;

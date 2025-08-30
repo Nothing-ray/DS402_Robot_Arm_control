@@ -14,11 +14,13 @@
 #include <codecvt>
 
 #include "CLASS_Motor.hpp"
-#include "Test_module.hpp"
 #include "Data_processing.hpp"
 #include "CAN_processing.hpp"
 
-
+#include "test/test_CLASS_Motor.hpp"
+#include "test/test_PDO_config.hpp"
+#include "test/test_PDO_processing.hpp"
+#include "test/test_SDO_State_Machine.hpp"
 
 
 
@@ -41,7 +43,17 @@ int main(){
     testMotorClass(motors);
     */
 
+    // 测试注释说明：
+    // testMotorClass(motors) - 电机类全面测试
+    // testPDOConfiguration() - PDO配置测试  
+    // testTPDOProcessing() - TPDO处理测试
+    // testSdoStateMachinePerformance() - SDO状态机单线程性能测试
+    // testSDOStateMachineMultiThreadPerformance() - SDO状态机多线程性能测试
+    // testSdoTimeoutRetryMechanism() - SDO超时重传机制测试
+    
+    //testPDOConfiguration();
     //testTPDOProcessing();
+    //testSdoStateMachinePerformance();
     //testSDOStateMachineMultiThreadPerformance();
     testSdoTimeoutRetryMechanism();
 
