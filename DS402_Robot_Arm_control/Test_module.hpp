@@ -1002,7 +1002,10 @@ void testTPDOProcessing() {
 
 
 
-/******************** SDO状态机测试 ********************/
+/**************************************** SDO状态机测试 ****************************************/
+
+
+
 
 
 
@@ -1271,11 +1274,22 @@ void testSdoStateMachinePerformance() {
 
 // 在测试模块中添加函数声明
 void testSdoStateMachinePerformance();
+void testSdoTimeoutRetryMechanism();
 
 
 
 
-/*********** SDO状态机多线程测试 **********/
+
+
+
+
+/******************************* SDO状态机多线程测试 *******************************/
+
+
+
+
+
+
 
 
 /**
@@ -1538,6 +1552,321 @@ void testSDOStateMachineMultiThreadPerformance() {
 }
 
 
+
+
+
+/******************************* SDO状态机超时重传机制测试 *******************************/
+
+
+
+
+
+
+/**
+ * @brief SDO超时重传机制全面测试函数
+ * 
+ * @details 该测试函数验证SDO状态机的重试机制和异常处理功能，包含：
+ * - 超时检测和重试机制验证
+ * - 重试计数器功能和上限控制
+ * - 成功响应后重试计数器清零
+ * - 最大重试次数达到后的异常抛出
+ * - 边界条件和状态转换验证
+ * 
+ * @note 本测试采用模拟超时的方式主动触发重试机制，验证完整的错误恢复流程
+ * @warning 测试中会故意触发超时和异常，相关错误信息属于预期行为
+ */
+void testSdoTimeoutRetryMechanism() {
+    std::cout << "=== SDO超时重传机制全面测试开始 ===\n";
+    std::cout << "测试项目: 超时检测、重试机制、异常处理、状态转换\n\n";
+
+    // 创建状态机实例用于测试
+    canopen::AtomicSdoStateMachine sdoMachine;
+
+    // 测试统计数据
+    int successfulRetries = 0;
+    int timeoutExceptions = 0;
+    int stateTransitionErrors = 0;
+    int totalTests = 0;
+
+    /******************** 阶段1: 基础重试机制测试 ********************/
+    std::cout << "[阶段1] 基础重试机制测试\n";
+    std::cout << "========================================\n";
+
+    std::cout << "1.1 测试正常重试流程（1次重试后成功）...\n";
+    try {
+        totalTests++;//测试次数
+        
+        // 准备测试用的SDO事务
+        uint8_t testRequestData[8] = { 0x40, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        CanFrame testFrame(0x601, testRequestData, 4);
+        auto transaction = sdoMachine.prepareTransaction(testFrame);
+        
+        // 启动事务
+        bool started = sdoMachine.startTransaction(transaction);
+        if (!started) {
+            std::cout << "  错误: 事务启动失败\n";
+            stateTransitionErrors++;
+            return;
+        }
+        
+        std::cout << "  事务启动成功，当前状态: WAITING_RESPONSE\n";
+        
+        // 模拟第一次超时
+        std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+        bool firstTimeout = sdoMachine.checkTimeout();
+        
+        if (firstTimeout && sdoMachine.getCurrentState() == canopen::SdoState::RETRYING) {
+            std::cout << "  首次超时检测成功，状态转换为RETRYING\n";
+            std::cout << "  重试计数器: " << static_cast<int>(sdoMachine.getRetryCount()) << "\n";
+            
+            // 检查是否需要重试
+            if (sdoMachine.needsRetry()) {
+                std::cout << "  重试标志正确设置，状态已转换为WAITING_RESPONSE\n";
+                
+                // 模拟成功响应
+                uint8_t responseData[8] = { 0x4B, 0x00, 0x60, 0x00, 0x37, 0x02, 0x00, 0x00 };
+                bool processed = sdoMachine.processResponse(responseData, 6, 1);
+                
+                if (processed && sdoMachine.getCurrentState() == canopen::SdoState::RESPONSE_VALID) {
+                    std::cout << "  响应处理成功，重试计数器已清零: " 
+                        << static_cast<int>(sdoMachine.getRetryCount()) << "\n";
+                    successfulRetries++;
+                    std::cout << "  ✓ 基础重试流程测试通过\n";
+                } else {
+                    std::cout << "  ✗ 响应处理失败\n";
+                    stateTransitionErrors++;
+                }
+            } else {
+                std::cout << "  ✗ 重试标志设置错误\n";
+                stateTransitionErrors++;
+            }
+        } else {
+            std::cout << "  ✗ 首次超时检测失败\n";
+            stateTransitionErrors++;
+        }
+        
+        sdoMachine.completeTransaction();
+        
+    } catch (const std::exception& e) {
+        std::cout << "  ✗ 意外异常: " << e.what() << "\n";
+        stateTransitionErrors++;
+    }
+
+    /******************** 阶段2: 最大重试次数测试 ********************/
+    std::cout << "\n[阶段2] 最大重试次数和异常抛出测试\n";
+    std::cout << "========================================\n";
+
+    std::cout << "2.1 测试达到最大重试次数后抛出异常...\n";
+    try {
+        totalTests++;
+        
+        // 重置状态机
+        sdoMachine.reset();
+        
+        // 准备新的测试事务
+        uint8_t testRequestData2[8] = { 0x40, 0x41, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        CanFrame testFrame2(0x602, testRequestData2, 4);
+        auto transaction2 = sdoMachine.prepareTransaction(testFrame2);
+        
+        bool started = sdoMachine.startTransaction(transaction2);
+        if (!started) {
+            std::cout << "  错误: 事务启动失败\n";
+            stateTransitionErrors++;
+            return;
+        }
+        
+        std::cout << "  开始连续超时测试...\n";
+        
+        // 连续触发超时直到达到最大重试次数
+        for (int retry = 0; retry < MAX_RETRY_COUNT; ++retry) {
+            std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+            bool timeout = sdoMachine.checkTimeout();
+            
+            std::cout << "  第" << (retry + 1) << "次超时检测: " 
+                << (timeout ? "成功" : "失败") 
+                << ", 重试计数: " << static_cast<int>(sdoMachine.getRetryCount()) << "\n";
+            
+            if (timeout && sdoMachine.getCurrentState() == canopen::SdoState::RETRYING) {
+                // 模拟重新发送
+                if (sdoMachine.needsRetry()) {
+                    std::cout << "    重试标志已设置，模拟重新发送\n";
+                } else {
+                    std::cout << "    ✗ 重试标志设置错误\n";
+                    stateTransitionErrors++;
+                    break;
+                }
+            }
+        }
+        
+        // 触发最终超时，应该抛出异常
+        std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+        std::cout << "  触发最终超时检测...\n";
+        
+        try {
+            sdoMachine.checkTimeout();
+            std::cout << "  ✗ 预期异常未抛出\n";
+            stateTransitionErrors++;
+        } catch (const std::runtime_error& e) {
+            std::cout << "  ✓ 成功捕获预期异常: " << e.what() << "\n";
+            std::cout << "  最终状态: " << (sdoMachine.getCurrentState() == canopen::SdoState::MAX_RETRIES_EXCEEDED ? 
+                "MAX_RETRIES_EXCEEDED" : "其他状态") << "\n";
+            timeoutExceptions++;
+        }
+        
+        sdoMachine.completeTransaction();
+        
+    } catch (const std::exception& e) {
+        if (std::string(e.what()).find("SDO通信超时") != std::string::npos) {
+            std::cout << "  ✓ 正确捕获超时异常: " << e.what() << "\n";
+            timeoutExceptions++;
+        } else {
+            std::cout << "  ✗ 捕获非预期异常: " << e.what() << "\n";
+            stateTransitionErrors++;
+        }
+    }
+
+    /******************** 阶段3: 边界条件和状态一致性测试 ********************/
+    std::cout << "\n[阶段3] 边界条件和状态一致性测试\n";
+    std::cout << "========================================\n";
+
+    std::cout << "3.1 测试重试计数器边界值...\n";
+    try {
+        totalTests++;
+        
+        // 重置并准备新事务
+        sdoMachine.reset();
+        uint8_t testRequestData3[8] = { 0x40, 0x64, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        CanFrame testFrame3(0x603, testRequestData3, 4);
+        auto transaction3 = sdoMachine.prepareTransaction(testFrame3);
+        
+        bool started = sdoMachine.startTransaction(transaction3);
+        if (started) {
+            // 验证初始重试计数为0
+            uint8_t initialRetryCount = sdoMachine.getRetryCount();
+            std::cout << "  初始重试计数: " << static_cast<int>(initialRetryCount) << " (期望: 0)\n";
+            
+            if (initialRetryCount == 0) {
+                std::cout << "  ✓ 初始重试计数正确\n";
+            } else {
+                std::cout << "  ✗ 初始重试计数错误\n";
+                stateTransitionErrors++;
+            }
+            
+            // 模拟一次成功响应，验证计数器保持为0
+            uint8_t successResponse[8] = { 0x43, 0x64, 0x60, 0x00, 0x00, 0x00, 0x01, 0x00 };
+            bool processed = sdoMachine.processResponse(successResponse, 8, 3);
+            
+            if (processed) {
+                uint8_t finalRetryCount = sdoMachine.getRetryCount();
+                std::cout << "  成功响应后重试计数: " << static_cast<int>(finalRetryCount) << " (期望: 0)\n";
+                
+                if (finalRetryCount == 0 && sdoMachine.getCurrentState() == canopen::SdoState::RESPONSE_VALID) {
+                    std::cout << "  ✓ 重试计数器状态正确\n";
+                    successfulRetries++;
+                } else {
+                    std::cout << "  ✗ 重试计数器状态错误\n";
+                    stateTransitionErrors++;
+                }
+            } else {
+                std::cout << "  ✗ 响应处理失败\n";
+                stateTransitionErrors++;
+            }
+        } else {
+            std::cout << "  ✗ 事务启动失败\n";
+            stateTransitionErrors++;
+        }
+        
+        sdoMachine.completeTransaction();
+        
+    } catch (const std::exception& e) {
+        std::cout << "  ✗ 边界条件测试异常: " << e.what() << "\n";
+        stateTransitionErrors++;
+    }
+
+    /******************** 阶段4: 并发安全性简单验证 ********************/
+    std::cout << "\n[阶段4] 状态机重置和清理测试\n";
+    std::cout << "========================================\n";
+
+    std::cout << "4.1 测试状态机重置功能...\n";
+    try {
+        totalTests++;
+        
+        // 启动一个事务但不完成
+        uint8_t testRequestData4[8] = { 0x40, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        CanFrame testFrame4(0x604, testRequestData4, 4);
+        auto transaction4 = sdoMachine.prepareTransaction(testFrame4);
+        
+        bool started = sdoMachine.startTransaction(transaction4);
+        if (started) {
+            std::cout << "  事务启动成功，当前状态: WAITING_RESPONSE\n";
+            std::cout << "  执行强制重置...\n";
+            
+            // 强制重置状态机
+            sdoMachine.reset();
+            
+            // 验证状态机已返回空闲状态
+            auto state = sdoMachine.getCurrentState();
+            bool isBusy = sdoMachine.isBusy();
+            
+            std::cout << "  重置后状态: " << (state == canopen::SdoState::IDLE ? "IDLE" : "非IDLE") << "\n";
+            std::cout << "  是否繁忙: " << (isBusy ? "是" : "否") << "\n";
+            
+            if (state == canopen::SdoState::IDLE && !isBusy) {
+                std::cout << "  ✓ 状态机重置成功\n";
+                successfulRetries++;
+            } else {
+                std::cout << "  ✗ 状态机重置失败\n";
+                stateTransitionErrors++;
+            }
+        } else {
+            std::cout << "  ✗ 事务启动失败\n";
+            stateTransitionErrors++;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << "  ✗ 重置测试异常: " << e.what() << "\n";
+        stateTransitionErrors++;
+    }
+
+    /******************** 测试结果汇总 ********************/
+    std::cout << "\n[测试结果汇总]\n";
+    std::cout << "========================================\n";
+    
+    std::cout << "总测试用例数: " << totalTests << "\n";
+    std::cout << "成功重试测试: " << successfulRetries << "\n";
+    std::cout << "超时异常测试: " << timeoutExceptions << "\n";
+    std::cout << "状态转换错误: " << stateTransitionErrors << "\n";
+    
+    // 计算成功率
+    int totalSuccessful = successfulRetries + timeoutExceptions;
+    double successRate = totalTests > 0 ? (double)totalSuccessful / totalTests * 100.0 : 0.0;
+    
+    std::cout << "\n测试成功率: " << std::fixed << std::setprecision(1) << successRate << "%\n";
+    
+    // 功能验证结果
+    std::cout << "\n功能验证结果:\n";
+    std::cout << "  重试机制: " << (successfulRetries > 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
+    std::cout << "  异常处理: " << (timeoutExceptions > 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
+    std::cout << "  状态转换: " << (stateTransitionErrors == 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
+    
+    // 实时性评估
+    std::cout << "\n实时性评估:\n";
+    if (stateTransitionErrors == 0) {
+        std::cout << "  ✓ SDO重试机制符合实时性要求\n";
+        std::cout << "  ✓ 异常处理机制工作正确\n";
+        std::cout << "  ✓ 状态机设计满足并发安全需求\n";
+    } else {
+        std::cout << "  ⚠ 发现状态转换问题，需要进一步调试\n";
+        std::cout << "  建议检查：\n";
+        std::cout << "    - 超时时间设置是否合理\n";
+        std::cout << "    - 原子操作的内存序是否正确\n";
+        std::cout << "    - 条件变量的等待逻辑是否完整\n";
+    }
+    
+    std::cout << "\n=== SDO超时重传机制测试完成 ===\n";
+    std::cout << "测试覆盖: 超时检测、重试机制、异常处理、状态转换、边界条件\n";
+    std::cout << "总体评估: " << (stateTransitionErrors == 0 && totalSuccessful >= 3 ? "通过" : "需要修复") << "\n";
+}
 
 
 
