@@ -70,13 +70,13 @@
 // RPDO1 配置 (0x200 + NodeID)
 // 0-4 目标位置  4-6 控制字
 #define RPDO1_MAPPINGS \
-    MAP_ENTRY(RPDO, 1, OD_TARGET_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_actual)) \
-    MAP_ENTRY(RPDO, 1, OD_CONTROL_WORD,    0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.statusWordRaw))
+    MAP_ENTRY(RPDO, 1, OD_TARGET_POSITION, 0x00, 0, 4, offsetof(Motor, position.raw_target)) \
+    MAP_ENTRY(RPDO, 1, OD_CONTROL_WORD,    0x00, 4, 2, offsetof(Motor, stateAndMode.controlData.controlWordRaw))
 
 // RPDO2 配置 (0x300 + NodeID)
 // 0-2 目标速度 2-4 目标电流
 #define RPDO2_MAPPINGS \
-    MAP_ENTRY(RPDO, 2, OD_TARGET_VELOCITY_VELOCITY_MODE, 0x00, 0, 2, offsetof(Motor, velocity.raw_target_position_mode)) \
+    MAP_ENTRY(RPDO, 2, OD_TARGET_VELOCITY_VELOCITY_MODE, 0x00, 0, 2, offsetof(Motor, velocity.raw_target_velocity_mode)) \
     MAP_ENTRY(RPDO, 2, OD_TARGET_CURRENT,  0x00, 2, 2, offsetof(Motor, current.raw_target))
 
 // TPDO1 配置 (0x180 + NodeID)

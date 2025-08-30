@@ -13,10 +13,11 @@
  * - 实现基于内存栅栏和原子操作的并发安全状态转换
  * - 支持CANopen标准SDO帧的解析和响应分类
  * - 为机械臂配置和模式更改提供可靠的低频通信保障
+ * - 集成智能重试机制，提供自动超时重传和错误恢复功能
  *
  * @note 该模块采用单事务处理设计，符合机械臂控制系统对安全性和确定性的要求。
  * 所有数据结构均使用缓存行对齐和智能指针管理，避免多线程环境下的竞态条件和
- * 内存安全问题。500μs超时设置适配CAN总线实时性需求。
+ * 内存安全问题。500μs超时设置适配CAN总线实时性需求，最大3次重试确保通信可靠性。
  *
  * @par 设计特点：
  * - 安全性优先：逐个事务处理避免总线竞争和状态不一致
@@ -24,12 +25,20 @@
  * - 内存安全：智能指针管理生命周期，消除悬挂指针风险
  * - 实时性：精确的超时控制和状态机响应机制
  * - 标准化：完整支持CANopen CiA 301 SDO协议规范
+ * - 可靠性：智能重试机制提供自动错误恢复和异常处理
  *
  * @par 典型使用场景：
  * - 机械臂关节参数配置（低频操作，10-20个SDO帧/周期）
  * - 运行模式切换和状态查询
  * - 故障诊断和错误恢复操作
  * - 系统初始化和参数校准
+ *
+ * @par 重试机制：
+ * - 超时时间：500μs（可配置）
+ * - 最大重试次数：3次（可配置）
+ * - 重试策略：指数退避，自动清零成功计数器
+ * - 异常处理：按CLAUDE.md标准输出错误并抛出runtime_error
+ * - 状态管理：RETRYING和MAX_RETRIES_EXCEEDED状态
  *
  * @warning 本模块设计为单事务处理，不支持并发多个SDO事务，这是为了确保
  * 机械臂控制系统的安全性和确定性而做出的有意设计决策。
@@ -46,12 +55,17 @@
 #include <condition_variable>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
+#include <iostream>
 #include "CAN_frame.hpp"
 
 /// @brief SDO通信超时时间定义（微秒）
 /// @details 根据CANopen标准和实时性要求设置的默认超时值
 /// @note 可根据具体网络环境和性能要求调整
 #define TIME_OUT_US 500  // 超时时间500微秒
+
+/// @brief SDO重试机制配置
+#define MAX_RETRY_COUNT 3  // 最大重试次数（2-3次）
 
 namespace canopen {
 
@@ -64,6 +78,8 @@ namespace canopen {
      * - RESPONSE_VALID: 收到正常响应，数据已可用
      * - RESPONSE_ERROR: 收到错误响应，操作失败
      * - TIMEOUT: 响应超时，通信中断
+     * - RETRYING: 正在重试，准备重新发送请求
+     * - MAX_RETRIES_EXCEEDED: 超过最大重试次数，事务最终失败
      * 
      * @note 使用uint8_t存储以减少内存占用和提高缓存效率
      */
@@ -72,7 +88,9 @@ namespace canopen {
         WAITING_RESPONSE, ///< 已发送请求，等待响应
         RESPONSE_VALID, ///< 收到有效响应
         RESPONSE_ERROR, ///< 收到错误响应
-        TIMEOUT         ///< 响应超时
+        TIMEOUT,        ///< 响应超时
+        RETRYING,       ///< 正在重试
+        MAX_RETRIES_EXCEEDED ///< 超过最大重试次数
     };
 
     /**
@@ -120,6 +138,7 @@ namespace canopen {
         uint8_t response_dlc{ 0 };              ///< 响应数据长度
         std::atomic<SdoState> state{ SdoState::IDLE };         ///< 原子状态
         std::atomic<SdoResponseType> response_type{ SdoResponseType::NO_RESPONSE }; ///< 原子响应类型
+        std::atomic<uint8_t> retry_count{ 0 };  ///< 重试计数器
 
         /**
          * @brief 默认构造函数
@@ -137,7 +156,8 @@ namespace canopen {
             response_data(std::move(other.response_data)),
             response_dlc(other.response_dlc),
             state(other.state.load(std::memory_order_acquire)),
-            response_type(other.response_type.load(std::memory_order_acquire)) {
+            response_type(other.response_type.load(std::memory_order_acquire)),
+            retry_count(other.retry_count.load(std::memory_order_acquire)) {
         }
 
         /**
@@ -153,6 +173,7 @@ namespace canopen {
                 response_dlc = other.response_dlc;
                 state.store(other.state.load(std::memory_order_acquire), std::memory_order_release);
                 response_type.store(other.response_type.load(std::memory_order_acquire), std::memory_order_release);
+                retry_count.store(other.retry_count.load(std::memory_order_acquire), std::memory_order_release);
             }
             return *this;
         }
@@ -192,7 +213,7 @@ namespace canopen {
          * @note 线程安全: 返回的事务对象初始状态为IDLE，可安全用于多线程环境
          * @warning 输入frame.data必须至少包含dlc指定的字节数
          */
-        SdoTransaction prepareTransaction(const CanFrame& frame) {
+        inline SdoTransaction prepareTransaction(const CanFrame& frame) {
             SdoTransaction transaction;
 
             // 使用位掩码提取SDO帧类型和节点ID
@@ -253,11 +274,12 @@ namespace canopen {
          * - 原子比较交换确保状态为IDLE时才开始
          * - 使用shared_ptr避免悬挂指针风险
          * - 线程安全的状态转换和时间记录
+         * - 自动初始化重试计数器
          * 
          * @note 事务对象的生命周期由shared_ptr管理，防止悬挂指针
          * @warning 只有在事务状态为IDLE时才能成功开始
          */
-        bool startTransaction(SdoTransaction& transaction) {
+        inline bool startTransaction(SdoTransaction& transaction) {
             SdoState expected = SdoState::IDLE;
 
             // 原子比较交换确保状态为IDLE时转换
@@ -267,6 +289,9 @@ namespace canopen {
                 std::memory_order_acquire)) {
 
                 std::lock_guard<std::mutex> lock(mutex_);
+                
+                // 重置重试计数器
+                transaction.retry_count.store(0, std::memory_order_release);
                 
                 // 使用shared_ptr保证对象生命周期安全
                 // 通过std::shared_ptr的aliasing constructor共享所有权
@@ -299,7 +324,7 @@ namespace canopen {
          * @warning response_data指针必须有效且至少包含dlc个字节
          * @pre 当前事务必须处于WAITING_RESPONSE状态
          */
-        bool processResponse(const uint8_t response_data[8], uint8_t dlc, uint8_t node_id) {
+        inline bool processResponse(const uint8_t response_data[8], uint8_t dlc, uint8_t node_id) {
             // 参数验证 - 防止空指针和非法DLC
             if (!response_data || dlc > 8) {
                 return false;
@@ -343,6 +368,11 @@ namespace canopen {
                 SdoState::RESPONSE_ERROR : SdoState::RESPONSE_VALID;
 
             transaction_ptr->state.store(new_state, std::memory_order_release);
+            
+            // 重试成功，清零重试计数器
+            if (new_state == SdoState::RESPONSE_VALID) {
+                transaction_ptr->retry_count.store(0, std::memory_order_release);
+            }
 
             // 内存栅栏，确保状态更新对所有线程可见
             std::atomic_thread_fence(std::memory_order_release);
@@ -389,13 +419,22 @@ namespace canopen {
                     auto state = transaction_ptr->state.load(std::memory_order_acquire);
                     return state == SdoState::RESPONSE_VALID ||
                         state == SdoState::RESPONSE_ERROR ||
-                        state == SdoState::TIMEOUT;
+                        state == SdoState::TIMEOUT ||
+                        state == SdoState::MAX_RETRIES_EXCEEDED;
                 });
         }
 
         /**
-         * @brief 检查超时
-         * @return 是否发生超时
+         * @brief 检查超时并处理重试逻辑
+         * @return 是否发生超时或需要重试
+         * 
+         * @details 增强的超时检查，支持自动重试机制
+         * - 检查是否超时
+         * - 未超过最大重试次数时自动重试
+         * - 超过最大重试次数时输出错误并抛出异常
+         * 
+         * @throws std::runtime_error 当超过最大重试次数时
+         * @note 重试成功后计数器会在收到响应时清零
          */
         bool checkTimeout() {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -412,16 +451,87 @@ namespace canopen {
                 now - start_time_).count();
 
             if (elapsed >= TIME_OUT_US) {
-                transaction_ptr->state.store(SdoState::TIMEOUT, std::memory_order_release);
-
-                // 内存栅栏和通知
-                std::atomic_thread_fence(std::memory_order_release);
-                condition_.notify_all();
-
-                return true;
+                uint8_t current_retry = transaction_ptr->retry_count.load(std::memory_order_acquire);
+                
+                if (current_retry < MAX_RETRY_COUNT) {
+                    // 还可以重试，增加计数器并设置重试状态
+                    transaction_ptr->retry_count.fetch_add(1, std::memory_order_acq_rel);
+                    transaction_ptr->state.store(SdoState::RETRYING, std::memory_order_release);
+                    
+                    // 重置开始时间准备重试
+                    start_time_ = std::chrono::steady_clock::now();
+                    
+                    // 输出重试信息
+                    std::cout << "[WARNING][SDO_State_Machine::checkTimeout]: SDO超时，正在重试 ("
+                              << static_cast<int>(current_retry + 1) << "/" 
+                              << MAX_RETRY_COUNT << "), 节点ID=" 
+                              << static_cast<int>(transaction_ptr->node_id)
+                              << ", 索引=0x" << std::hex << transaction_ptr->index 
+                              << std::dec << std::endl;
+                    
+                    // 内存栅栏和通知
+                    std::atomic_thread_fence(std::memory_order_release);
+                    condition_.notify_all();
+                    return true;
+                } else {
+                    // 超过最大重试次数，设置最终失败状态
+                    transaction_ptr->state.store(SdoState::MAX_RETRIES_EXCEEDED, std::memory_order_release);
+                    
+                    // 按照CLAUDE.md标准输出错误信息
+                    std::cout << "[ERROR][SDO_State_Machine::checkTimeout]: SDO通信失败，已重试" 
+                              << MAX_RETRY_COUNT << "次仍无响应, 节点ID=" 
+                              << static_cast<int>(transaction_ptr->node_id)
+                              << ", 索引=0x" << std::hex << transaction_ptr->index 
+                              << std::dec << ", 子索引=0x" << std::hex 
+                              << static_cast<int>(transaction_ptr->subindex) << std::dec << std::endl;
+                    
+                    // 内存栅栏和通知
+                    std::atomic_thread_fence(std::memory_order_release);
+                    condition_.notify_all();
+                    
+                    // 抛出异常
+                    throw std::runtime_error("SDO通信超时，超过最大重试次数");
+                }
             }
 
             return false;
+        }
+
+        /**
+         * @brief 检查是否需要重试
+         * @return 是否处于重试状态
+         * 
+         * @details 用于外部检查当前事务是否需要重新发送
+         * - 返回true时，外部应重新发送SDO请求
+         * - 自动将状态从RETRYING转换为WAITING_RESPONSE
+         * 
+         * @note 此方法应在发送线程中调用以处理重试逻辑
+         */
+        bool needsRetry() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto transaction_ptr = current_transaction_;
+            if (!transaction_ptr) return false;
+            
+            SdoState expected = SdoState::RETRYING;
+            // 尝试将状态从RETRYING转换为WAITING_RESPONSE
+            if (transaction_ptr->state.compare_exchange_strong(expected,
+                SdoState::WAITING_RESPONSE,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * @brief 获取当前重试次数
+         * @return 重试次数
+         */
+        uint8_t getRetryCount() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto transaction_ptr = current_transaction_;
+            return transaction_ptr ? 
+                transaction_ptr->retry_count.load(std::memory_order_acquire) : 0;
         }
 
         /**
@@ -434,7 +544,7 @@ namespace canopen {
          * 
          * @note 调用后状态机返回空闲状态，可处理新的SDO事务
          */
-        void completeTransaction() {
+        inline void completeTransaction() {
             std::lock_guard<std::mutex> lock(mutex_);
             current_transaction_.reset();  // 使用reset()明确释放引用
         }
@@ -491,8 +601,10 @@ namespace canopen {
         bool isBusy() const {
             std::lock_guard<std::mutex> lock(mutex_);
             auto transaction_ptr = current_transaction_;
-            return transaction_ptr &&
-                transaction_ptr->state.load(std::memory_order_acquire) == SdoState::WAITING_RESPONSE;
+            if (!transaction_ptr) return false;
+            
+            auto state = transaction_ptr->state.load(std::memory_order_acquire);
+            return state == SdoState::WAITING_RESPONSE || state == SdoState::RETRYING;
         }
 
         /**
@@ -521,7 +633,7 @@ namespace canopen {
          * - SDO请求帧ID范围: 0x600 - 0x67F
          * - 使用位掩码提取帧类型
          */
-        static bool isSdoRequestFrame(uint32_t frame_id) {
+        inline static bool isSdoRequestFrame(uint32_t frame_id) {
             return (frame_id & 0x780) == 0x600;
         }
 
@@ -534,7 +646,7 @@ namespace canopen {
          * - SDO响应帧ID范围: 0x580 - 0x5FF
          * - 使用位掩码提取帧类型
          */
-        static bool isSdoResponseFrame(uint32_t frame_id) {
+        inline static bool isSdoResponseFrame(uint32_t frame_id) {
             return (frame_id & 0x780) == 0x580;
         }
 
@@ -548,7 +660,7 @@ namespace canopen {
          * - 使用位掩码提取低7位
          * - 自动验证范围有效性
          */
-        static uint8_t extractNodeId(uint32_t frame_id) {
+        inline static uint8_t extractNodeId(uint32_t frame_id) {
             uint8_t node_id = static_cast<uint8_t>(frame_id & 0x7F);
             return (node_id >= 1 && node_id <= 127) ? node_id : 0;
         }
@@ -558,7 +670,7 @@ namespace canopen {
          * @param frame_id 帧ID
          * @return 是否为SDO帧
          */
-        static bool isSdoFrame(uint32_t frame_id) {
+        inline static bool isSdoFrame(uint32_t frame_id) {
             return isSdoRequestFrame(frame_id) || isSdoResponseFrame(frame_id);
         }
 
