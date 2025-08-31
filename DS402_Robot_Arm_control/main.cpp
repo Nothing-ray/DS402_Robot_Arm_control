@@ -31,17 +31,17 @@ int main(){
 	std::wcout.imbue(std::locale());
 
 
-	/*  
+	 
          //电机类测试
         // 创建电机实例数组   
     std::array<Motor, 6> motors = {
         Motor(1), Motor(2), Motor(3),
-        Motor(4), Motor(5), Motor(6)
-    };
+        Motor(4), Motor(5), Motor(6) };
+    
 
     // 执行测试
-    testMotorClass(motors);
-    */
+    //testMotorClass(motors);
+    
 
     // 测试注释说明：
     // testMotorClass(motors) - 电机类全面测试
@@ -55,8 +55,9 @@ int main(){
     //testTPDOProcessing();
     //testSdoStateMachinePerformance();
     //testSDOStateMachineMultiThreadPerformance();
-    testSdoTimeoutRetryMechanism();
+    //testSdoTimeoutRetryMechanism();
 
+    testSdoTimeoutRetryMechanism();
 
 
 

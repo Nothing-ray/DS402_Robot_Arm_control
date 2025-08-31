@@ -42,6 +42,18 @@
     <ClInclude Include="Read_Thread.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="test\test_CLASS_Motor.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_PDO_config.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_PDO_processing.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_SDO_State_Machine.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">

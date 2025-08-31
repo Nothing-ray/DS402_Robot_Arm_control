@@ -37,7 +37,7 @@ using namespace std::chrono_literals;
         operation; \
         auto end = std::chrono::high_resolution_clock::now(); \
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start); \
-        std::cout << description << " took " << duration.count() << " us\n"; \
+        std::cout << description << " 耗时 " << duration.count() << " 微秒\n"; \
     } while(0)
 
 
@@ -88,8 +88,8 @@ void testTPDOProcessing() {
 
     // 构建PDO配置表
     std::vector<PdoMappingEntry> pdoTable = buildArmMappingTable(6);
-    std::cout << " Y  初始化6个电机" << std::endl;
-    std::cout << " Y  PDO配置表生成完成，共" << pdoTable.size() << "条映射" << std::endl;
+    std::cout << " Yes  初始化6个电机" << std::endl;
+    std::cout << " Yes  PDO配置表生成完成，共" << pdoTable.size() << "条映射" << std::endl;
 
     // 2. TPDO1测试 (0x180 + NodeID) - 实际位置 + 状态字
     std::cout << "\n[步骤2] 测试TPDO1 (实际位置 + 状态字)" << std::endl;
@@ -152,10 +152,10 @@ void testTPDOProcessing() {
                 << std::fixed << std::setprecision(1) << angleDegrees
                 << "°) [期望: " << convertSensorAngle(test.position, true) << "]";
             if ((actualPos - convertSensorAngle(test.position, true)) < 0.01f) {
-                std::cout << "  Y " << std::endl;
+                std::cout << "  Yes 正确" << std::endl;
             }
             else {
-                std::cout << "  N  错误!" << std::endl;
+                std::cout << "  No 错误!" << std::endl;
             }
 
             // 检查状态字
@@ -164,17 +164,17 @@ void testTPDOProcessing() {
             std::cout << "  状态字: 0x" << std::hex << actualStatus
                 << " (期望: 0x" << test.statusWord << ")" << std::dec;
             if (actualStatus == test.statusWord) {
-                std::cout << "  Y " << std::endl;
+                std::cout << "  Yes 正确" << std::endl;
             }
             else {
-                std::cout << "  N  错误!" << std::endl;
+                std::cout << "  No 错误!" << std::endl;
             }
 
             // 检查刷新标志
             std::cout << "  位置刷新标志: " <<
-                ((motor.position.flags_.load() & MotorPosition::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Y " : "未设置  N ") << std::endl;
+                ((motor.position.flags_.load() & MotorPosition::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Yes " : "未设置  No ") << std::endl;
             std::cout << "  状态刷新标志: " <<
-                (motor.stateAndMode.refresh ? "已设置  Y " : "未设置  N ") << std::endl;
+                (motor.stateAndMode.refresh ? "已设置  Yes " : "未设置  No ") << std::endl;
         }
     }
 
@@ -235,10 +235,10 @@ void testTPDOProcessing() {
             int16_t actualVel = motor.velocity.actual_rpm.load();
             std::cout << "  实际速度: " << actualVel << " RPM (期望: " << test.velocity << ")";
             if (actualVel == test.velocity) {
-                std::cout << "  Y " << std::endl;
+                std::cout << "  Yes 正确" << std::endl;
             }
             else {
-                std::cout << "  N  错误!" << std::endl;
+                std::cout << "  No 错误!" << std::endl;
             }
 
             // 检查电流值
@@ -248,17 +248,17 @@ void testTPDOProcessing() {
                 << std::fixed << std::setprecision(3) << currentAmperes
                 << " A) [期望: " << test.current << " mA]";
             if (actualCur == test.current) {
-                std::cout << "  Y " << std::endl;
+                std::cout << "  Yes 正确" << std::endl;
             }
             else {
-                std::cout << "  N  错误!" << std::endl;
+                std::cout << "  No 错误!" << std::endl;
             }
 
             // 检查刷新标志
             std::cout << "  速度刷新标志: " <<
-                ((motor.velocity.flags_.load() & MotorVelocity::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Y " : "未设置  N ") << std::endl;
+                ((motor.velocity.flags_.load() & MotorVelocity::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Yes " : "未设置  No ") << std::endl;
             std::cout << "  电流刷新标志: " <<
-                ((motor.current.flags_.load() & MotorCurrent::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Y " : "未设置  N ") << std::endl;
+                ((motor.current.flags_.load() & MotorCurrent::RAW_DATA_RECEIVE_NEED_REFRESH) ? "已设置  Yes " : "未设置  No ") << std::endl;
         }
     }
 
@@ -297,7 +297,7 @@ void testTPDOProcessing() {
             auto& motor = motors[0];
             std::lock_guard<std::mutex> lock(motor.mtx_);
             std::cout << "    速度: " << motor.velocity.actual_rpm.load() << " RPM, "
-                << "电流: " << motor.current.actual_current.load() << " mA  Y " << std::endl;
+                << "电流: " << motor.current.actual_current.load() << " mA  Yes 正确" << std::endl;
         }
     }
 
@@ -310,7 +310,7 @@ void testTPDOProcessing() {
         std::cout << "\n测试: 数据长度不足的TPDO1帧" << std::endl;
         CanFrame shortFrame(0x181, new uint8_t[3]{ 0x01, 0x02, 0x03 }, 3); // 只有3字节
         parseCanFrame(shortFrame, motors, pdoTable);
-        std::cout << "  处理完成，应忽略此帧  Y " << std::endl;
+        std::cout << "  处理完成，应忽略此帧  Yes 正确" << std::endl;
     }
 
     // 测试无效节点ID
@@ -318,7 +318,7 @@ void testTPDOProcessing() {
         std::cout << "\n测试: 无效节点ID (NodeID=0)" << std::endl;
         CanFrame invalidFrame(0x180, new uint8_t[6]{ 0 }, 6); // NodeID = 0
         parseCanFrame(invalidFrame, motors, pdoTable);
-        std::cout << "  处理完成，应忽略此帧  Y " << std::endl;
+        std::cout << "  处理完成，应忽略此帧  Yes 正确" << std::endl;
     }
 
     // 测试超出范围的节点ID
@@ -326,7 +326,7 @@ void testTPDOProcessing() {
         std::cout << "\n测试: 超出范围的节点ID (NodeID=7)" << std::endl;
         CanFrame outOfRangeFrame(0x187, new uint8_t[6]{ 0 }, 6); // NodeID = 7
         parseCanFrame(outOfRangeFrame, motors, pdoTable);
-        std::cout << "  处理完成，应忽略此帧  Y " << std::endl;
+        std::cout << "  处理完成，应忽略此帧  Yes 正确" << std::endl;
     }
 
     // 6. 实际应用场景模拟

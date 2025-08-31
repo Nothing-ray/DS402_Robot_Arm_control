@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file test_CLASS_Motor.hpp
  * @brief 电机类核心功能测试
  * 
@@ -20,6 +20,9 @@
 #include <atomic>       // 用于 std::atomic
 #include <vector>       // 用于 std::vector
 #include <numeric>      // 用于 std::accumulate
+#include <tuple>        // 用于 std::tuple, std::make_tuple, std::get
+#include <iomanip>      // 用于 std::setw, std::setfill
+#include <cstring>      // 用于 std::memcpy
 
 #include "../CLASS_Motor.hpp"
 #include "../Data_processing.hpp"
@@ -97,26 +100,26 @@ void testMotorClass(std::array<Motor, 6>& motors) {
         auto start = std::chrono::high_resolution_clock::now();
         motors[i].init();
         auto end = std::chrono::high_resolution_clock::now();
-        long initTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        long initTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         perfData.initTimes.push_back(initTime);
-        std::cout << "  电机" << i << " 初始化耗时: " << initTime << " 微秒\n";
+        std::cout << "  电机" << i << " 初始化耗时: " << initTime << " 纳秒\n";
     }
 
     // 数据转换精度测试
     std::cout << "\n1.2 数据转换精度测试...\n";
-    Motor& testMotor = motors[0];
+    Motor& testMotor2 = motors[0];
 
     // 测试电流转换
     float testCurrents[] = { 0.0f, 100.5f, -50.2f, 1000.0f, -1000.0f };
     for (float testCurrent : testCurrents) {
-        testMotor.current.target_current.store(testCurrent);
-        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        testMotor2.current.target_current.store(testCurrent);
+        testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
         // 手动调用电流数据刷新
-        testMotor.refreshMotorData(testMotor.current);
+        testMotor2.refreshMotorData(testMotor2.current);
 
-        float readBack = testMotor.current.target_current.load();
-        Current_type encoderVal = testMotor.current.target_encoder.load();
+        float readBack = testMotor2.current.target_current.load();
+        Current_type encoderVal = testMotor2.current.target_encoder.load();
 
         std::cout << "  电流测试: " << testCurrent << " mA → 编码器:" << encoderVal
             << " → 读回:" << readBack << " mA (误差:" << std::abs(testCurrent - readBack) << ")\n";
@@ -126,14 +129,14 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     std::cout << "\n  位置转换测试:\n";
     float testAngles[] = { 0.0f, 90.0f, -90.0f, 180.0f, -180.0f, 359.9f };
     for (float testAngle : testAngles) {
-        testMotor.position.target_degree.store(testAngle);
-        testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        testMotor2.position.target_degree.store(testAngle);
+        testMotor2.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
         // 手动调用位置数据刷新
-        testMotor.refreshMotorData(testMotor.position);
+        testMotor2.refreshMotorData(testMotor2.position);
 
-        float readBack = testMotor.position.target_degree.load();
-        Position_type encoderVal = testMotor.position.target_encoder.load();
+        float readBack = testMotor2.position.target_degree.load();
+        Position_type encoderVal = testMotor2.position.target_encoder.load();
 
         std::cout << "  角度测试: " << testAngle << "° → 编码器:" << encoderVal
             << " → 读回:" << readBack << "° (误差:" << std::abs(testAngle - readBack) << ")\n";
@@ -143,14 +146,14 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     std::cout << "\n  速度转换测试:\n";
     float testSpeeds[] = { 0.0f, 100.0f, -100.0f, 500.0f, -500.0f };
     for (float testSpeed : testSpeeds) {
-        testMotor.velocity.target_rpm_velocity_mode.store(testSpeed);
-        testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+        testMotor2.velocity.target_rpm_velocity_mode.store(testSpeed);
+        testMotor2.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
 
         // 手动调用速度数据刷新
-        testMotor.refreshMotorData(testMotor.velocity);
+        testMotor2.refreshMotorData(testMotor2.velocity);
 
-        float readBack = testMotor.velocity.target_rpm_velocity_mode.load();
-        Velocity_type encoderVal = testMotor.velocity.target_encoder_velocity_mode.load();
+        float readBack = testMotor2.velocity.target_rpm_velocity_mode.load();
+        Velocity_type encoderVal = testMotor2.velocity.target_encoder_velocity_mode.load();
 
         std::cout << "  速度测试: " << testSpeed << " RPM → 编码器:" << encoderVal
             << " → 读回:" << readBack << " RPM (误差:" << std::abs(testSpeed - readBack) << ")\n";
@@ -166,22 +169,22 @@ void testMotorClass(std::array<Motor, 6>& motors) {
         auto start = std::chrono::high_resolution_clock::now();
 
         // 设置多个标志位
-        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
         // 检查标志位
-        bool flag1 = testMotor.current.needsProcess(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH);
-        bool flag2 = testMotor.current.needsProcess(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
-        bool flag3 = testMotor.current.needsProcess(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH);
+        bool flag1 = testMotor2.current.needsProcess(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH);
+        bool flag2 = testMotor2.current.needsProcess(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+        bool flag3 = testMotor2.current.needsProcess(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH);
 
         // 清除标志位
-        testMotor.current.markProcessed(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH);
-        testMotor.current.markProcessed(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
-        testMotor.current.markProcessed(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH);
+        testMotor2.current.markProcessed(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH);
+        testMotor2.current.markProcessed(MotorCurrent::Flags::ENCODER_DATA_SEND_NEED_REFRESH);
+        testMotor2.current.markProcessed(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH);
 
         auto end = std::chrono::high_resolution_clock::now();
-        long flagTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        long flagTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         perfData.flagOperationTimes.push_back(flagTime);
 
         if (!flag1 || !flag2 || !flag3) {
@@ -199,17 +202,17 @@ void testMotorClass(std::array<Motor, 6>& motors) {
 
         // 原子写入测试
         Current_type testValue = static_cast<Current_type>(100 + i);
-        testMotor.current.raw_actual.atomicWriteValue(testValue);
-        testMotor.position.raw_actual.atomicWriteValue(static_cast<Position_type>(1000 + i));
-        testMotor.velocity.raw_actual.atomicWriteValue(static_cast<Velocity_type>(500 + i));
+        testMotor2.current.raw_actual.atomicWriteValue(testValue);
+        testMotor2.position.raw_actual.atomicWriteValue(static_cast<Position_type>(1000 + i));
+        testMotor2.velocity.raw_actual.atomicWriteValue(static_cast<Velocity_type>(500 + i));
 
         // 原子读取测试
-        Current_type readCurrent = testMotor.current.raw_actual.atomicReadValue();
-        Position_type readPosition = testMotor.position.raw_actual.atomicReadValue();
-        Velocity_type readVelocity = testMotor.velocity.raw_actual.atomicReadValue();
+        Current_type readCurrent = testMotor2.current.raw_actual.atomicReadValue();
+        Position_type readPosition = testMotor2.position.raw_actual.atomicReadValue();
+        Velocity_type readVelocity = testMotor2.velocity.raw_actual.atomicReadValue();
 
         auto end = std::chrono::high_resolution_clock::now();
-        long atomicTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        long atomicTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         perfData.atomicOperationTimes.push_back(atomicTime);
 
         // 数据一致性检查
@@ -233,29 +236,29 @@ void testMotorClass(std::array<Motor, 6>& motors) {
         Velocity_type rawVelocity = static_cast<Velocity_type>(600 + i);
 
         // 写入原始数据并设置刷新标志
-        testMotor.current.raw_actual.atomicWriteValue(rawCurrent);
-        testMotor.position.raw_actual.atomicWriteValue(rawPosition);
-        testMotor.velocity.raw_actual.atomicWriteValue(rawVelocity);
+        testMotor2.current.raw_actual.atomicWriteValue(rawCurrent);
+        testMotor2.position.raw_actual.atomicWriteValue(rawPosition);
+        testMotor2.velocity.raw_actual.atomicWriteValue(rawVelocity);
 
-        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
-        testMotor.position.flags_.fetch_or(MotorPosition::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
-        testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
+        testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
+        testMotor2.position.flags_.fetch_or(MotorPosition::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
+        testMotor2.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
 
         // 执行刷新
-        testMotor.refreshAllMotorData();
+        testMotor2.refreshAllMotorData();
 
         auto end = std::chrono::high_resolution_clock::now();
-        long refreshTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        long refreshTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         perfData.singleRefreshTimes.push_back(refreshTime);
 
         // 验证刷新结果
-        float actualCurrent = testMotor.current.actual_current.load();
-        float actualPosition = testMotor.position.actual_degree.load();
-        float actualVelocity = testMotor.velocity.actual_rpm.load();
+        float actualCurrent = testMotor2.current.actual_current.load();
+        float actualPosition = testMotor2.position.actual_degree.load();
+        float actualVelocity = testMotor2.velocity.actual_rpm.load();
 
         if (i % 10 == 0) {  // 每10次输出一次详细信息
             std::cout << "  第" << i << "次刷新: 电流" << actualCurrent << "mA, 位置"
-                << actualPosition << "°, 速度" << actualVelocity << "RPM (耗时:" << refreshTime << "μs)\n";
+                << actualPosition << "度, 速度" << actualVelocity << "RPM (耗时:" << refreshTime << "纳秒)\n";
         }
     }
 
@@ -298,7 +301,7 @@ void testMotorClass(std::array<Motor, 6>& motors) {
                 }
 
                 auto end = std::chrono::high_resolution_clock::now();
-                long writeTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                long writeTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
                 // 线程安全地添加性能数据
                 static std::mutex perfMutex;
@@ -350,7 +353,7 @@ void testMotorClass(std::array<Motor, 6>& motors) {
                 }
 
                 auto end = std::chrono::high_resolution_clock::now();
-                long readTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                long readTime = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
                 // 线程安全地添加性能数据
                 static std::mutex perfMutex;
@@ -381,37 +384,55 @@ void testMotorClass(std::array<Motor, 6>& motors) {
 
     // 计算统计数据的Lambda函数
     auto calculateStats = [](const std::vector<long>& data) -> std::tuple<double, long, long> {
-        if (data.empty()) return { 0.0, 0, 0 };
+        if (data.empty()) return std::make_tuple(0.0, 0L, 0L);
         double avg = std::accumulate(data.begin(), data.end(), 0.0) / data.size();
         long maxVal = *std::max_element(data.begin(), data.end());
         long minVal = *std::min_element(data.begin(), data.end());
-        return { avg, maxVal, minVal };
+        return std::make_tuple(avg, maxVal, minVal);
         };
 
     // 输出各项性能统计
-    auto [avgInit, maxInit, minInit] = calculateStats(perfData.initTimes);
+    std::tuple<double, long, long> initStats = calculateStats(perfData.initTimes);
+    double avgInit = std::get<0>(initStats);
+    long maxInit = std::get<1>(initStats);
+    long minInit = std::get<2>(initStats);
     std::cout << "初始化性能:\n";
-    std::cout << "  平均: " << avgInit << " μs, 最大: " << maxInit << " μs, 最小: " << minInit << " μs\n";
+    std::cout << "  平均: " << avgInit << " ns, 最大: " << maxInit << " ns, 最小: " << minInit << " ns\n";
 
-    auto [avgRefresh, maxRefresh, minRefresh] = calculateStats(perfData.singleRefreshTimes);
+    std::tuple<double, long, long> refreshStats = calculateStats(perfData.singleRefreshTimes);
+    double avgRefresh = std::get<0>(refreshStats);
+    long maxRefresh = std::get<1>(refreshStats);
+    long minRefresh = std::get<2>(refreshStats);
     std::cout << "\n单线程刷新性能:\n";
-    std::cout << "  平均: " << avgRefresh << " μs, 最大: " << maxRefresh << " μs, 最小: " << minRefresh << " μs\n";
+    std::cout << "  平均: " << avgRefresh << " ns, 最大: " << maxRefresh << " ns, 最小: " << minRefresh << " ns\n";
 
-    auto [avgAtomicOp, maxAtomicOp, minAtomicOp] = calculateStats(perfData.atomicOperationTimes);
+    std::tuple<double, long, long> atomicStats = calculateStats(perfData.atomicOperationTimes);
+    double avgAtomicOp = std::get<0>(atomicStats);
+    long maxAtomicOp = std::get<1>(atomicStats);
+    long minAtomicOp = std::get<2>(atomicStats);
     std::cout << "\n原子操作性能:\n";
-    std::cout << "  平均: " << avgAtomicOp << " μs, 最大: " << maxAtomicOp << " μs, 最小: " << minAtomicOp << " μs\n";
+    std::cout << "  平均: " << avgAtomicOp << " ns, 最大: " << maxAtomicOp << " ns, 最小: " << minAtomicOp << " ns\n";
 
-    auto [avgMultiWrite, maxMultiWrite, minMultiWrite] = calculateStats(perfData.multiWriteTimes);
+    std::tuple<double, long, long> multiWriteStats = calculateStats(perfData.multiWriteTimes);
+    double avgMultiWrite = std::get<0>(multiWriteStats);
+    long maxMultiWrite = std::get<1>(multiWriteStats);
+    long minMultiWrite = std::get<2>(multiWriteStats);
     std::cout << "\n多线程写入性能:\n";
-    std::cout << "  平均: " << avgMultiWrite << " μs, 最大: " << maxMultiWrite << " μs, 最小: " << minMultiWrite << " μs\n";
+    std::cout << "  平均: " << avgMultiWrite << " ns, 最大: " << maxMultiWrite << " ns, 最小: " << minMultiWrite << " ns\n";
 
-    auto [avgMultiRead, maxMultiRead, minMultiRead] = calculateStats(perfData.multiReadTimes);
+    std::tuple<double, long, long> multiReadStats = calculateStats(perfData.multiReadTimes);
+    double avgMultiRead = std::get<0>(multiReadStats);
+    long maxMultiRead = std::get<1>(multiReadStats);
+    long minMultiRead = std::get<2>(multiReadStats);
     std::cout << "\n多线程读取性能:\n";
-    std::cout << "  平均: " << avgMultiRead << " μs, 最大: " << maxMultiRead << " μs, 最小: " << minMultiRead << " μs\n";
+    std::cout << "  平均: " << avgMultiRead << " ns, 最大: " << maxMultiRead << " ns, 最小: " << minMultiRead << " ns\n";
 
-    auto [avgFlag, maxFlag, minFlag] = calculateStats(perfData.flagOperationTimes);
+    std::tuple<double, long, long> flagStats = calculateStats(perfData.flagOperationTimes);
+    double avgFlag = std::get<0>(flagStats);
+    long maxFlag = std::get<1>(flagStats);
+    long minFlag = std::get<2>(flagStats);
     std::cout << "\n标志位操作性能:\n";
-    std::cout << "  平均: " << avgFlag << " μs, 最大: " << maxFlag << " μs, 最小: " << minFlag << " μs\n";
+    std::cout << "  平均: " << avgFlag << " ns, 最大: " << maxFlag << " ns, 最小: " << minFlag << " ns\n";
 
     /******************** 阶段7: 最终状态验证 ********************/
     std::cout << "\n[阶段7] 最终状态验证\n";
@@ -459,7 +480,7 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     uint8_t readByte;
     test1Byte.atomicRead(&readByte);
     std::cout << "  1字节模板测试: 写入0x" << std::hex << (int)testByte << " 读取0x" << (int)readByte;
-    if (testByte == readByte) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testByte == readByte) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试2字节模板
     AlignedRawData<2, int16_t> test2Byte;
@@ -468,7 +489,7 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     int16_t readShort;
     test2Byte.atomicRead(&readShort);
     std::cout << "  2字节模板测试: 写入" << testShort << " 读取" << readShort;
-    if (testShort == readShort) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testShort == readShort) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试4字节模板
     AlignedRawData<4, int32_t> test4Byte;
@@ -477,7 +498,7 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     int32_t readInt;
     test4Byte.atomicRead(&readInt);
     std::cout << "  4字节模板测试: 写入" << testInt << " 读取" << readInt;
-    if (testInt == readInt) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testInt == readInt) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试字节数组接口
     std::cout << "8.2 测试字节数组接口...\n";
@@ -489,47 +510,45 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     for (int i = 0; i < 4; i++) {
         if (testBytes[i] != readBytes[i]) bytesMatch = false;
     }
-    std::cout << "  字节数组接口测试: " << (bytesMatch ? "✓" : "✗") << "\n";
+    std::cout << "  字节数组接口测试: " << (bytesMatch ? "Yes" : "No") << "\n";
 
     // 测试缓存行对齐
     std::cout << "8.3 测试缓存行对齐...\n";
-    bool alignmentOK = (reinterpret_cast<uintptr_t>(&test4Byte) % 64 == 0);
-    std::cout << "  64字节对齐验证: " << (alignmentOK ? "✓" : "✗") << "\n";
+    bool alignmentOK2 = (reinterpret_cast<uintptr_t>(&test4Byte) % 64 == 0);
+    std::cout << "  64字节对齐验证: " << (alignmentOK2 ? "Yes" : "No") << "\n";
 
     /******************** 阶段9: MotorVelocity双模式专项测试 ********************/
     std::cout << "\n[阶段9] MotorVelocity双模式专项测试\n";
     std::cout << "========================================\n";
 
-    Motor& testMotor = motors[0];
-
     // 测试速度模式
     std::cout << "9.1 测试速度模式...\n";
     Velocity_type testVelMode = 1500;
-    testMotor.velocity.raw_target_velocity_mode.atomicWriteValue(testVelMode);
-    testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
-    testMotor.refreshMotorData(testMotor.velocity);
+    testMotor2.velocity.raw_target_velocity_mode.atomicWriteValue(testVelMode);
+    testMotor2.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+    testMotor2.refreshMotorData(testMotor2.velocity);
 
-    Velocity_type readVelEncoder = testMotor.velocity.target_encoder_velocity_mode.load();
-    float readVelRPM = testMotor.velocity.target_rpm_velocity_mode.load();
+    Velocity_type readVelEncoder = testMotor2.velocity.target_encoder_velocity_mode.load();
+    float readVelRPM = testMotor2.velocity.target_rpm_velocity_mode.load();
     std::cout << "  速度模式: 原始值=" << testVelMode << ", 编码器=" << readVelEncoder << ", RPM=" << readVelRPM;
-    if (testVelMode == readVelEncoder && std::abs(readVelRPM - testVelMode) < 0.001f) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testVelMode == readVelEncoder && std::abs(readVelRPM - testVelMode) < 0.001f) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试位置模式
     std::cout << "9.2 测试位置模式...\n";
     Velocity_type testPosMode = 800;
-    testMotor.velocity.raw_target_position_mode.atomicWriteValue(testPosMode);
-    testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE, std::memory_order_release);
-    testMotor.refreshMotorData(testMotor.velocity);
+    testMotor2.velocity.raw_target_position_mode.atomicWriteValue(testPosMode);
+    testMotor2.velocity.flags_.fetch_or(MotorVelocity::Flags::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE, std::memory_order_release);
+    testMotor2.refreshMotorData(testMotor2.velocity);
 
-    Velocity_type readPosEncoder = testMotor.velocity.target_encoder_position_mode.load();
-    float readPosRPM = testMotor.velocity.target_rpm_position_mode.load();
+    Velocity_type readPosEncoder = testMotor2.velocity.target_encoder_position_mode.load();
+    float readPosRPM = testMotor2.velocity.target_rpm_position_mode.load();
     std::cout << "  位置模式: 原始值=" << testPosMode << ", 编码器=" << readPosEncoder << ", RPM=" << readPosRPM;
-    if (testPosMode == readPosEncoder && std::abs(readPosRPM - testPosMode) < 0.001f) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testPosMode == readPosEncoder && std::abs(readPosRPM - testPosMode) < 0.001f) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试模式区分性
     std::cout << "9.3 测试模式区分性...\n";
     bool modesDistinct = (readVelEncoder != readPosEncoder);
-    std::cout << "  速度/位置模式数据区分: " << (modesDistinct ? "✓" : "✗") << "\n";
+    std::cout << "  速度/位置模式数据区分: " << (modesDistinct ? "Yes" : "No") << "\n";
 
     /******************** 阶段10: StateAndMode结构体专项测试 ********************/
     std::cout << "\n[阶段10] StateAndMode结构体专项测试\n";
@@ -539,34 +558,34 @@ void testMotorClass(std::array<Motor, 6>& motors) {
 
     // 测试控制字写入
     uint8_t controlWord[2] = { 0x06, 0x00 }; // 使能电机
-    std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), controlWord, 2);
+    std::memcpy(const_cast<uint8_t*>(testMotor2.stateAndMode.controlData.controlWordRaw), controlWord, 2);
 
     // 测试状态字读取
     uint8_t statusWord[2] = { 0x37, 0x02 }; // 运行中状态
-    std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.statusWordRaw), statusWord, 2);
+    std::memcpy(const_cast<uint8_t*>(testMotor2.stateAndMode.controlData.statusWordRaw), statusWord, 2);
 
-    uint16_t readControlWord = (testMotor.stateAndMode.controlData.controlWordRaw[1] << 8) | testMotor.stateAndMode.controlData.controlWordRaw[0];
-    uint16_t readStatusWord = (testMotor.stateAndMode.controlData.statusWordRaw[1] << 8) | testMotor.stateAndMode.controlData.statusWordRaw[0];
+    uint16_t readControlWord = (testMotor2.stateAndMode.controlData.controlWordRaw[1] << 8) | testMotor2.stateAndMode.controlData.controlWordRaw[0];
+    uint16_t readStatusWord = (testMotor2.stateAndMode.controlData.statusWordRaw[1] << 8) | testMotor2.stateAndMode.controlData.statusWordRaw[0];
 
     std::cout << "  控制字: 0x" << std::hex << std::setw(4) << std::setfill('0') << readControlWord << std::dec;
-    if (readControlWord == 0x0006) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (readControlWord == 0x0006) std::cout << " Yes\n"; else std::cout << " No\n";
 
     std::cout << "  状态字: 0x" << std::hex << std::setw(4) << std::setfill('0') << readStatusWord << std::dec;
-    if (readStatusWord == 0x0237) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (readStatusWord == 0x0237) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试运行模式
     std::cout << "10.2 测试运行模式...\n";
-    testMotor.stateAndMode.modeData.modeOfOperationRaw[0] = static_cast<uint8_t>(MotorMode::PROFILE_POSITION);
-    uint8_t readMode = testMotor.stateAndMode.modeData.modeOfOperationRaw[0];
+    testMotor2.stateAndMode.modeData.modeOfOperationRaw[0] = static_cast<uint8_t>(MotorMode::PROFILE_POSITION);
+    uint8_t readMode = testMotor2.stateAndMode.modeData.modeOfOperationRaw[0];
     std::cout << "  运行模式: " << static_cast<int>(readMode) << " (期望: 1)";
-    if (readMode == 1) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (readMode == 1) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试refresh标志
     std::cout << "10.3 测试refresh标志...\n";
-    testMotor.stateAndMode.refresh.store(true);
-    bool refreshState = testMotor.stateAndMode.refresh.load();
+    testMotor2.stateAndMode.refresh.store(true);
+    bool refreshState = testMotor2.stateAndMode.refresh.load();
     std::cout << "  refresh标志: " << (refreshState ? "true" : "false");
-    if (refreshState) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (refreshState) std::cout << " Yes\n"; else std::cout << " No\n";
 
     /******************** 阶段11: MotorAccelDecel结构体专项测试 ********************/
     std::cout << "\n[阶段11] MotorAccelDecel结构体专项测试\n";
@@ -576,24 +595,24 @@ void testMotorClass(std::array<Motor, 6>& motors) {
 
     // 测试加速度
     AccelDecel_type testAccel = 5000; // RPM/min
-    testMotor.accelDecel.raw_accel.atomicWriteValue(testAccel);
-    AccelDecel_type readAccel = testMotor.accelDecel.raw_accel.atomicReadValue();
+    testMotor2.accelDecel.raw_accel.atomicWriteValue(testAccel);
+    AccelDecel_type readAccel = testMotor2.accelDecel.raw_accel.atomicReadValue();
     std::cout << "  加速度: 写入=" << testAccel << " 读取=" << readAccel;
-    if (testAccel == readAccel) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testAccel == readAccel) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试减速度
     AccelDecel_type testDecel = 3000; // RPM/min
-    testMotor.accelDecel.raw_decel.atomicWriteValue(testDecel);
-    AccelDecel_type readDecel = testMotor.accelDecel.raw_decel.atomicReadValue();
+    testMotor2.accelDecel.raw_decel.atomicWriteValue(testDecel);
+    AccelDecel_type readDecel = testMotor2.accelDecel.raw_decel.atomicReadValue();
     std::cout << "  减速度: 写入=" << testDecel << " 读取=" << readDecel;
-    if (testDecel == readDecel) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (testDecel == readDecel) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试对象字典索引
     std::cout << "11.2 测试对象字典索引...\n";
-    std::cout << "  加速度索引: 0x" << std::hex << testMotor.accelDecel.accel_Index << " (期望: 0x6083)";
-    if (testMotor.accelDecel.accel_Index == 0x6083) std::cout << " ✓\n"; else std::cout << " ✗\n";
-    std::cout << "  减速度索引: 0x" << std::hex << testMotor.accelDecel.decel_Index << " (期望: 0x6084)";
-    if (testMotor.accelDecel.decel_Index == 0x6084) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    std::cout << "  加速度索引: 0x" << std::hex << testMotor2.accelDecel.accel_Index << " (期望: 0x6083)";
+    if (testMotor2.accelDecel.accel_Index == 0x6083) std::cout << " Yes\n"; else std::cout << " No\n";
+    std::cout << "  减速度索引: 0x" << std::hex << testMotor2.accelDecel.decel_Index << " (期望: 0x6084)";
+    if (testMotor2.accelDecel.decel_Index == 0x6084) std::cout << " Yes\n"; else std::cout << " No\n";
 
     /******************** 阶段12: 边界值和异常处理测试 ********************/
     std::cout << "\n[阶段12] 边界值和异常处理测试\n";
@@ -604,41 +623,41 @@ void testMotorClass(std::array<Motor, 6>& motors) {
     // 测试int16_t边界值
     Current_type maxCurrent = 32767;
     Current_type minCurrent = -32768;
-    testMotor.current.raw_actual.atomicWriteValue(maxCurrent);
-    Current_type readMax = testMotor.current.raw_actual.atomicReadValue();
-    testMotor.current.raw_actual.atomicWriteValue(minCurrent);
-    Current_type readMin = testMotor.current.raw_actual.atomicReadValue();
+    testMotor2.current.raw_actual.atomicWriteValue(maxCurrent);
+    Current_type readMax = testMotor2.current.raw_actual.atomicReadValue();
+    testMotor2.current.raw_actual.atomicWriteValue(minCurrent);
+    Current_type readMin = testMotor2.current.raw_actual.atomicReadValue();
 
     std::cout << "  int16_t最大值: " << maxCurrent << " -> " << readMax;
-    if (maxCurrent == readMax) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (maxCurrent == readMax) std::cout << " Yes\n"; else std::cout << " No\n";
     std::cout << "  int16_t最小值: " << minCurrent << " -> " << readMin;
-    if (minCurrent == readMin) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (minCurrent == readMin) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试int32_t边界值
     Position_type maxPosition = 2147483647;
     Position_type minPosition = -2147483648;
-    testMotor.position.raw_actual.atomicWriteValue(maxPosition);
-    Position_type readMaxPos = testMotor.position.raw_actual.atomicReadValue();
-    testMotor.position.raw_actual.atomicWriteValue(minPosition);
-    Position_type readMinPos = testMotor.position.raw_actual.atomicReadValue();
+    testMotor2.position.raw_actual.atomicWriteValue(maxPosition);
+    Position_type readMaxPos = testMotor2.position.raw_actual.atomicReadValue();
+    testMotor2.position.raw_actual.atomicWriteValue(minPosition);
+    Position_type readMinPos = testMotor2.position.raw_actual.atomicReadValue();
 
     std::cout << "  int32_t最大值: " << maxPosition << " -> " << readMaxPos;
-    if (maxPosition == readMaxPos) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (maxPosition == readMaxPos) std::cout << " Yes\n"; else std::cout << " No\n";
     std::cout << "  int32_t最小值: " << minPosition << " -> " << readMinPos;
-    if (minPosition == readMinPos) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (minPosition == readMinPos) std::cout << " Yes\n"; else std::cout << " No\n";
 
     // 测试标志位冲突
     std::cout << "12.2 测试标志位冲突处理...\n";
-    testMotor.current.flags_.store(0);
-    testMotor.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
-    testMotor.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+    testMotor2.current.flags_.store(0);
+    testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH, std::memory_order_release);
+    testMotor2.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-    Flag_type conflictFlags = testMotor.current.flags_.load();
+    Flag_type conflictFlags = testMotor2.current.flags_.load();
     bool hasReceiveFlag = conflictFlags & MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH;
     bool hasSendFlag = conflictFlags & MotorCurrent::Flags::RAW_DATA_SEND_NEED_REFRESH;
 
     std::cout << "  标志位冲突测试: 接收标志=" << (hasReceiveFlag ? "有" : "无") << ", 发送标志=" << (hasSendFlag ? "有" : "无");
-    if (hasReceiveFlag && hasSendFlag) std::cout << " ✓\n"; else std::cout << " ✗\n";
+    if (hasReceiveFlag && hasSendFlag) std::cout << " Yes\n"; else std::cout << " No\n";
 
     /******************** 实时性能评估 ********************/
     std::cout << "实时性能评估 (基于2ms控制周期):\n";

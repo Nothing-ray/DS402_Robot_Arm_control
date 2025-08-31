@@ -68,7 +68,7 @@ using namespace std::chrono_literals;
  * @warning 测试中将故意触发异常，相关错误信息属于预期行为
  */
 void testPDOConfiguration() {
-    std::cout << "=== PDO Configuration Test Begin ===\n\n";
+    std::cout << "=== PDO配置测试开始 ===\n\n";
 
     /* 第一阶段：映射表初始化测试 */
     std::vector<PdoMappingEntry> mappingTable;
@@ -76,31 +76,31 @@ void testPDOConfiguration() {
     // 使用计时宏测量6电机映射表构建时间
     TIME_IT(
         mappingTable = buildArmMappingTable(6),
-        "Build mapping table for 6 motors"
+        "构建6电机映射表"
     );
 
     /* 打印映射表详细内容 */
-    std::cout << "\n=== Mapping Table Content ===\n";
+    std::cout << "\n=== 映射表内容 ===\n";
     for (const auto& entry : mappingTable) {
         // 格式化输出每个映射条目信息：
         // 1. 电机编号 | 2. PDO类型及通道 | 3. 对象字典地址
         // 4. 数据帧偏移 | 5. 数据大小 | 6. Motor类成员偏移
-        std::cout << "Motor " << (int)entry.motorIndex
+        std::cout << "电机" << (int)entry.motorIndex
             << " | " << (entry.isTx ? "TPDO" : "RPDO") << (int)entry.pdoIndex
-            << " | OD: 0x" << std::hex << entry.index << std::dec << "/" << (int)entry.subIndex
-            << " | Frame offset: " << (int)entry.offsetInPdo
-            << " | Size: " << (int)entry.size << " bytes"
-            << " | Motor offset: " << entry.motorFieldOffset
+            << " | 对象字典: 0x" << std::hex << entry.index << std::dec << "/" << (int)entry.subIndex
+            << " | 帧偏移: " << (int)entry.offsetInPdo
+            << " | 大小: " << (int)entry.size << " 字节"
+            << " | 电机偏移: " << entry.motorFieldOffset
             << "\n";
     }
-    std::cout << "Total entries: " << mappingTable.size() << "\n\n";
+    std::cout << "映射条目总数: " << mappingTable.size() << "\n\n";
 
     /* 第二阶段：COB-ID转换工具测试 */
-    std::cout << "=== COB-ID Conversion Test ===\n";
+    std::cout << "=== COB-ID转换测试 ===\n";
 
     // 定义COB-ID测试lambda函数，封装重复测试逻辑
     auto testCobIdConversion = [](uint8_t motorId) {
-        std::cout << "For Motor " << (int)motorId << ":\n";
+        std::cout << "电机" << (int)motorId << ":\n";
 
         try {
             // 测试SDO ID转换
@@ -116,60 +116,60 @@ void testPDOConfiguration() {
         }
         catch (const std::exception& e) {
             // 捕获并报告转换异常
-            std::cerr << "  Error: " << e.what() << "\n";
+            std::cerr << "  错误: " << e.what() << "\n";
         }
         };
 
     /* 测试用例1：正常值测试（电机1） */
     TIME_IT(
         testCobIdConversion(1),
-        "COB-ID conversion for motor 1"
+        "电机1的COB-ID转换"
     );
 
     /* 测试用例2：边界值测试（电机12，最大值） */
-    std::cout << "\nTesting boundary values:\n";
+    std::cout << "\n边界值测试:\n";
     TIME_IT(
         testCobIdConversion(12),
-        "COB-ID conversion for motor 12 (max)"
+        "电机12的COB-ID转换(最大值)"
     );
 
     /* 测试用例3：异常值测试 */
-    std::cout << "\nTesting invalid values:\n";
+    std::cout << "\n无效值测试:\n";
 
     // 子用例3.1：电机ID为0（非法值）
     try {
         TIME_IT(
             toSdoMotorId(0),
-            "Invalid motor ID 0"
+            "无效电机ID 0"
         );
     }
     catch (const std::exception& e) {
-        std::cerr << "Expected error: " << e.what() << "\n";
+        std::cerr << "预期错误: " << e.what() << "\n";
     }
 
     // 子用例3.2：电机ID为13（超出上限）
     try {
         TIME_IT(
             toRpdoCobId(13, 1),
-            "Invalid motor ID 13"
+            "无效电机ID 13"
         );
     }
     catch (const std::exception& e) {
-        std::cerr << "Expected error: " << e.what() << "\n";
+        std::cerr << "预期错误: " << e.what() << "\n";
     }
 
     // 子用例3.3：PDO索引为5（非法值）
     try {
         TIME_IT(
             toTpdoCobId(1, 5),
-            "Invalid PDO index 5"
+            "无效PDO索引 5"
         );
     }
     catch (const std::exception& e) {
-        std::cerr << "Expected error: " << e.what() << "\n";
+        std::cerr << "预期错误: " << e.what() << "\n";
     }
 
-    std::cout << "\n=== PDO Configuration Test Complete ===\n";
+    std::cout << "\n=== PDO配置测试完成 ===\n";
 }
 
 #undef TIME_IT

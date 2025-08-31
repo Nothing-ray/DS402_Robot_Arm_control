@@ -104,6 +104,13 @@ struct CanFrame {
     std::vector<uint8_t> binaryFrame; ///< 拼装后用于实际发送的13字节二进制帧
 
     /**
+     * @brief 默认构造函数
+     */
+    CanFrame() : frameID(0), dlc(0), frameInfo(0) {
+        std::memset(data, 0, sizeof(data));
+    }
+
+    /**
      * @brief 构造函数，初始化 CAN 帧
      *
      * @param id          帧ID

@@ -528,7 +528,7 @@ namespace canopen {
             }
             return false;
         }
-
+         
         /**
          * @brief 获取当前重试次数
          * @return 重试次数

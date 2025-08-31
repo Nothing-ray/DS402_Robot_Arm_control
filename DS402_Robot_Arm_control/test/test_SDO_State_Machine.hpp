@@ -27,8 +27,8 @@
 using namespace std::chrono_literals;
 
 // 常量定义
-constexpr int TIME_OUT_US = 1000;    // 1ms 超时
-constexpr int MAX_RETRY_COUNT = 3;   // 最大重试次数
+#define TEST_TIME_OUT_US 1000    // 1ms 超时
+#define TEST_MAX_RETRY_COUNT  3   // 最大重试次数
 
 // 计时工具宏
 #define TIME_IT(operation, description) \
@@ -296,7 +296,7 @@ void testSdoStateMachinePerformance() {
     std::cout << "  >1000ns: " << over1000ns << " 次 (" << (over1000ns * 100.0 / perfData.totalTimes.size()) << "%)\n";
 
 
-    std::cout << "实时性评估: " << (realTimeCapable ? "✓ 满足要求" : "✗ 需要优化") << "\n";
+    std::cout << "实时性评估: " << (realTimeCapable ? "Yes 满足要求" : "✗ 需要优化") << "\n";
 
     // 正确的吞吐量计算
     double totalTestTimeNs = std::accumulate(perfData.totalTimes.begin(),
@@ -313,10 +313,10 @@ void testSdoStateMachinePerformance() {
 
     // 输出建议
     if (realTimeCapable) {
-        std::cout << "✓ 状态机性能良好，适合实时控制系统使用\n";
+        std::cout << "Yes 状态机性能良好，适合实时控制系统使用\n";
     }
     else {
-        std::cout << "⚠ 状态机性能需要优化，建议:\n";
+        std::cout << "!!! 状态机性能需要优化，建议:\n";
         std::cout << "  - 检查内存屏障使用是否必要\n";
         std::cout << "  - 优化条件变量等待逻辑\n";
         std::cout << "  - 减少不必要的内存拷贝\n";
@@ -411,7 +411,7 @@ void testSDOStateMachineMultiThreadPerformance() {
 
     // 测试参数
     constexpr int TEST_DURATION_MS = 2000;   // 每轮测试持续时间
-    constexpr int NUM_TEST_ROUNDS = 5;       // 测试轮数
+    constexpr int NUM_TEST_ROUNDS = 10;       // 测试轮数
 
     bool is_first = true;
 
@@ -599,7 +599,7 @@ void testSDOStateMachineMultiThreadPerformance() {
         realTimeCapable = false;
     }
 
-    std::cout << "实时性评估: " << (realTimeCapable ? "✓ 满足要求" : "✗ 需要优化") << "\n";
+    std::cout << "实时性评估: " << (realTimeCapable ? "Yes 满足要求" : "✗ 需要优化") << "\n";
     std::cout << "\n=== SDO状态机多线程性能测试完成 ===\n";
 }
 
@@ -646,7 +646,7 @@ void testSdoTimeoutRetryMechanism() {
 
     std::cout << "1.1 测试正常重试流程（1次重试后成功）...\n";
     try {
-        totalTests++;//测试次数
+        totalTests++; // 测试次数
 
         // 准备测试用的SDO事务
         uint8_t testRequestData[8] = { 0x40, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00 };
@@ -664,7 +664,7 @@ void testSdoTimeoutRetryMechanism() {
         std::cout << "  事务启动成功，当前状态: WAITING_RESPONSE\n";
 
         // 模拟第一次超时
-        std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+        std::this_thread::sleep_for(std::chrono::microseconds(TEST_TIME_OUT_US + 100));
         bool firstTimeout = sdoMachine.checkTimeout();
 
         if (firstTimeout && sdoMachine.getCurrentState() == canopen::SdoState::RETRYING) {
@@ -683,7 +683,7 @@ void testSdoTimeoutRetryMechanism() {
                     std::cout << "  响应处理成功，重试计数器已清零: "
                         << static_cast<int>(sdoMachine.getRetryCount()) << "\n";
                     successfulRetries++;
-                    std::cout << "  ✓ 基础重试流程测试通过\n";
+                    std::cout << "  Yes 基础重试流程测试通过\n";
                 }
                 else {
                     std::cout << "  ✗ 响应处理失败\n";
@@ -734,8 +734,8 @@ void testSdoTimeoutRetryMechanism() {
         std::cout << "  开始连续超时测试...\n";
 
         // 连续触发超时直到达到最大重试次数
-        for (int retry = 0; retry < MAX_RETRY_COUNT; ++retry) {
-            std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+        for (int retry = 0; retry < TEST_MAX_RETRY_COUNT; ++retry) {
+            std::this_thread::sleep_for(std::chrono::microseconds(TEST_TIME_OUT_US + 100));
             bool timeout = sdoMachine.checkTimeout();
 
             std::cout << "  第" << (retry + 1) << "次超时检测: "
@@ -756,7 +756,7 @@ void testSdoTimeoutRetryMechanism() {
         }
 
         // 触发最终超时，应该抛出异常
-        std::this_thread::sleep_for(std::chrono::microseconds(TIME_OUT_US + 100));
+        std::this_thread::sleep_for(std::chrono::microseconds(TEST_TIME_OUT_US + 100));
         std::cout << "  触发最终超时检测...\n";
 
         try {
@@ -765,7 +765,7 @@ void testSdoTimeoutRetryMechanism() {
             stateTransitionErrors++;
         }
         catch (const std::runtime_error& e) {
-            std::cout << "  ✓ 成功捕获预期异常: " << e.what() << "\n";
+            std::cout << "  Yes 成功捕获预期异常: " << e.what() << "\n";
             std::cout << "  最终状态: " << (sdoMachine.getCurrentState() == canopen::SdoState::MAX_RETRIES_EXCEEDED ?
                 "MAX_RETRIES_EXCEEDED" : "其他状态") << "\n";
             timeoutExceptions++;
@@ -776,7 +776,7 @@ void testSdoTimeoutRetryMechanism() {
     }
     catch (const std::exception& e) {
         if (std::string(e.what()).find("SDO通信超时") != std::string::npos) {
-            std::cout << "  ✓ 正确捕获超时异常: " << e.what() << "\n";
+            std::cout << "  Yes 正确捕获超时异常: " << e.what() << "\n";
             timeoutExceptions++;
         }
         else {
@@ -806,7 +806,7 @@ void testSdoTimeoutRetryMechanism() {
             std::cout << "  初始重试计数: " << static_cast<int>(initialRetryCount) << " (期望: 0)\n";
 
             if (initialRetryCount == 0) {
-                std::cout << "  ✓ 初始重试计数正确\n";
+                std::cout << "  Yes 初始重试计数正确\n";
             }
             else {
                 std::cout << "  ✗ 初始重试计数错误\n";
@@ -822,7 +822,7 @@ void testSdoTimeoutRetryMechanism() {
                 std::cout << "  成功响应后重试计数: " << static_cast<int>(finalRetryCount) << " (期望: 0)\n";
 
                 if (finalRetryCount == 0 && sdoMachine.getCurrentState() == canopen::SdoState::RESPONSE_VALID) {
-                    std::cout << "  ✓ 重试计数器状态正确\n";
+                    std::cout << "  Yes 重试计数器状态正确\n";
                     successfulRetries++;
                 }
                 else {
@@ -877,7 +877,7 @@ void testSdoTimeoutRetryMechanism() {
             std::cout << "  是否繁忙: " << (isBusy ? "是" : "否") << "\n";
 
             if (state == canopen::SdoState::IDLE && !isBusy) {
-                std::cout << "  ✓ 状态机重置成功\n";
+                std::cout << "  Yes 状态机重置成功\n";
                 successfulRetries++;
             }
             else {
@@ -913,16 +913,16 @@ void testSdoTimeoutRetryMechanism() {
 
     // 功能验证结果
     std::cout << "\n功能验证结果:\n";
-    std::cout << "  重试机制: " << (successfulRetries > 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
-    std::cout << "  异常处理: " << (timeoutExceptions > 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
-    std::cout << "  状态转换: " << (stateTransitionErrors == 0 ? "✓ 工作正常" : "✗ 存在问题") << "\n";
+    std::cout << "  重试机制: " << (successfulRetries > 0 ? "Yes 工作正常" : "✗ 存在问题") << "\n";
+    std::cout << "  异常处理: " << (timeoutExceptions > 0 ? "Yes 工作正常" : "✗ 存在问题") << "\n";
+    std::cout << "  状态转换: " << (stateTransitionErrors == 0 ? "Yes 工作正常" : "✗ 存在问题") << "\n";
 
     // 实时性评估
     std::cout << "\n实时性评估:\n";
     if (stateTransitionErrors == 0) {
-        std::cout << "  ✓ SDO重试机制符合实时性要求\n";
-        std::cout << "  ✓ 异常处理机制工作正确\n";
-        std::cout << "  ✓ 状态机设计满足并发安全需求\n";
+        std::cout << "  Yes SDO重试机制符合实时性要求\n";
+        std::cout << "  Yes 异常处理机制工作正确\n";
+        std::cout << "  Yes 状态机设计满足并发安全需求\n";
     }
     else {
         std::cout << "  ⚠ 发现状态转换问题，需要进一步调试\n";
@@ -939,7 +939,8 @@ void testSdoTimeoutRetryMechanism() {
 
 
 
-
+#undef TEST_TIME_OUT_US
+#undef TEST_MAX_RETRY_COUNT
 #undef TIME_IT
 
 #endif // TEST_SDO_STATE_MACHINE_HPP
