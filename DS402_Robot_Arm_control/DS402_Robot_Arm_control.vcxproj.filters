@@ -24,9 +24,6 @@
     <ClInclude Include="CAN_frame.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="Test_module.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="PDO_config.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -54,9 +51,15 @@
     <ClInclude Include="test\test_SDO_State_Machine.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CAN_Queue.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CAN_Queue.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

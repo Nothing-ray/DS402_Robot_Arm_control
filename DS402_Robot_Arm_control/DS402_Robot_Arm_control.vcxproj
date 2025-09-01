@@ -139,6 +139,7 @@
   <ItemGroup>
     <ClInclude Include="CAN_frame.hpp" />
     <ClInclude Include="CAN_processing.hpp" />
+    <ClInclude Include="CAN_Queue.hpp" />
     <ClInclude Include="CLASS_Motor.hpp" />
     <ClInclude Include="Data_processing.hpp" />
     <ClInclude Include="PDO_config.hpp" />
@@ -149,9 +150,9 @@
     <ClInclude Include="test\test_PDO_config.hpp" />
     <ClInclude Include="test\test_PDO_processing.hpp" />
     <ClInclude Include="test\test_SDO_State_Machine.hpp" />
-    <ClInclude Include="Test_module.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="CAN_Queue.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
