@@ -146,6 +146,7 @@
     <ClInclude Include="Read_Thread.hpp" />
     <ClInclude Include="SDO_State_Machine.hpp" />
     <ClInclude Include="Send_Thread.hpp" />
+    <ClInclude Include="Serial_Module.hpp" />
     <ClInclude Include="test\test_CLASS_Motor.hpp" />
     <ClInclude Include="test\test_PDO_config.hpp" />
     <ClInclude Include="test\test_PDO_processing.hpp" />

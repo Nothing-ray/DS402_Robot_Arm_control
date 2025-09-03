@@ -2,9 +2,8 @@
   "ExpandedNodes": [
     "",
     "\\DS402_Robot_Arm_control",
-    "\\DS402_Robot_Arm_control\\Reference",
-    "\\DS402_Robot_Arm_control\\test"
+    "\\DS402_Robot_Arm_control\\Reference"
   ],
-  "SelectedNode": "\\README.md",
+  "SelectedNode": "\\DS402_Robot_Arm_control\\ut",
   "PreviewInSolutionExplorer": false
 }

@@ -17,11 +17,13 @@
 #include "Data_processing.hpp"
 #include "CAN_processing.hpp"
 
+#include "CAN_Queue.hpp"
+
 #include "test/test_CLASS_Motor.hpp"
 #include "test/test_PDO_config.hpp"
 #include "test/test_PDO_processing.hpp"
 #include "test/test_SDO_State_Machine.hpp"
-
+#include "test/test_Serial_Module.hpp"
 
 
 
@@ -38,6 +40,8 @@ int main(){
         Motor(1), Motor(2), Motor(3),
         Motor(4), Motor(5), Motor(6) };
     
+
+    SerialPortManager serial;
 
     // 执行测试
     //testMotorClass(motors);
@@ -57,9 +61,11 @@ int main(){
     //testSDOStateMachineMultiThreadPerformance();
     //testSdoTimeoutRetryMechanism();
 
-    testSdoTimeoutRetryMechanism();
+    //testSdoTimeoutRetryMechanism();
 
-
+    //testSerialBasicSend("COM3");
 
 	return 0;
 }
+
+

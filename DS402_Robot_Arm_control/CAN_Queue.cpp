@@ -8,13 +8,13 @@
 #include "CAN_Queue.hpp"
 
 // 发送队列定义（无锁队列，大小1024）
-boost::lockfree::queue<CanFrame> sendQueue(1024);
+boost::lockfree::queue<CanFrame*> sendQueue(1024);
 
 // 接收队列定义（无锁队列，大小1024）
-boost::lockfree::queue<CanFrame> receiveQueue(1024);
+boost::lockfree::queue<CanFrame*> receiveQueue(1024);
 
 // 规划队列定义（有锁队列）
-std::queue<CanFrame> planQueue;
+std::queue<std::shared_ptr<CanFrame>> planQueue;
 std::mutex planQueueMutex;
 std::condition_variable planQueueCV;
 

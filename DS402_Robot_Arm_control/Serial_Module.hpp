@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file Serial_Module.hpp
  * @brief 串口管理模块 - 中心化共享实例设计
  * 
@@ -32,6 +32,8 @@
 #include <chrono>
 #include <deque>
 #include <sstream>
+#include <thread>       // 添加线程支持
+#include <algorithm>    // 添加算法支持
 
 #include "CAN_frame.hpp"
 
@@ -51,16 +53,6 @@
 /// 启用异步发送功能（推荐开启）
 #ifndef DISABLE_ASYNC_SEND
 #define ENABLE_ASYNC_SEND
-#endif
-
-/// 启用性能统计功能
-#ifndef DISABLE_PERF_STATS
-#define ENABLE_PERF_STATS
-#endif
-
-/// 启用批量发送优化
-#ifndef DISABLE_BATCH_OPTIMIZATION  
-#define ENABLE_BATCH_OPTIMIZATION
 #endif
 
 /**
@@ -97,7 +89,6 @@ constexpr size_t MAX_BATCH_FRAMES = 24;
  * - **高性能异步发送**: 支持异步缓冲发送，减少线程阻塞时间
  * - **批量处理优化**: 支持批量帧发送，最大化总线利用率
  * - **周期对齐缓冲**: 严格单周期容量限制，确保实时性
- * - **全面性能监控**: 内置性能统计和错误计数，便于调试优化
  * - **自动错误恢复**: 连接异常自动检测和重连机制
  * 
  * ## 性能优化特性
@@ -110,8 +101,6 @@ constexpr size_t MAX_BATCH_FRAMES = 24;
  * ## 编译时配置
  * 通过定义以下宏启用特定功能：
  * - `ENABLE_ASYNC_SEND`: 启用异步发送功能（推荐）
- * - `ENABLE_PERF_STATS`: 启用性能统计功能
- * - `ENABLE_BATCH_OPTIMIZATION`: 启用批量发送优化
  * - `ENABLE_SERIAL_DEBUG`: 启用调试输出
  * 
  * @note 所有串口操作都通过本模块进行，确保线程安全和资源一致性
@@ -151,20 +140,6 @@ private:
 #ifdef ENABLE_ASYNC_SEND
     std::deque<CanFrame> asyncFrameBuffer_;         ///< 异步发送帧缓冲区（按完整帧存储）
     std::atomic<bool> asyncSending_{false};         ///< 异步发送进行中标志
-    std::atomic<size_t> asyncSendBytes_{0};         ///< 异步发送字节统计
-    std::atomic<size_t> asyncSendFrames_{0};        ///< 异步发送帧统计
-#endif
-
-#ifdef ENABLE_PERF_STATS
-    // 性能统计相关成员
-    struct {
-        std::atomic<uint64_t> totalFramesSent_{0};  ///< 总发送帧数
-        std::atomic<uint64_t> totalBytesSent_{0};   ///< 总发送字节数
-        std::atomic<uint64_t> sendErrors_{0};       ///< 发送错误次数
-        std::atomic<uint64_t> reconnectCount_{0};   ///< 重连次数
-        std::atomic<uint64_t> batchFramesSent_{0};  ///< 批量发送帧数
-        std::atomic<uint64_t> frameDropCount_{0};   ///< 帧丢弃计数器
-    } stats_;
 #endif
     
     /**
@@ -239,34 +214,15 @@ private:
             std::cerr << "[ERROR][SerialPortManager::handleAsyncSendComplete]: " 
                       << error.message() << std::endl;
 #endif
-#ifdef ENABLE_PERF_STATS
-            stats_.sendErrors_.fetch_add(1, std::memory_order_relaxed);
-#endif
         } else {
             // 计算发送的完整帧数量和可能的剩余字节
             size_t framesSent = bytesTransferred / CAN_FRAME_SIZE;
             size_t remainingBytes = bytesTransferred % CAN_FRAME_SIZE;
             
-#ifdef ENABLE_PERF_STATS
-            stats_.totalBytesSent_.fetch_add(bytesTransferred, std::memory_order_relaxed);
-            asyncSendBytes_.fetch_add(bytesTransferred, std::memory_order_relaxed);
-            asyncSendFrames_.fetch_add(framesSent, std::memory_order_relaxed);
-#endif
-            
-            // 清除已发送的完整帧
-            if (framesSent > 0 && framesSent <= asyncFrameBuffer_.size()) {
-                asyncFrameBuffer_.erase(asyncFrameBuffer_.begin(), 
-                                      asyncFrameBuffer_.begin() + framesSent);
-            }
-            
             // 处理可能的帧边界错误（剩余字节不为0）
             if (remainingBytes > 0) {
                 // 严重错误：帧边界不完整，可能导致后续数据错位
                 connected_.store(false, std::memory_order_release);
-                
-#ifdef ENABLE_PERF_STATS
-                stats_.sendErrors_.fetch_add(1, std::memory_order_relaxed);
-#endif
                 
 #ifdef ENABLE_SERIAL_DEBUG
                 std::cerr << "[CRITICAL][SerialPortManager::handleAsyncSendComplete]: " 
@@ -278,6 +234,12 @@ private:
                 // 清空缓冲区防止数据错位
                 asyncFrameBuffer_.clear();
                 return; // 不再继续发送
+            }
+            
+            // 清除已发送的完整帧
+            if (framesSent > 0 && framesSent <= asyncFrameBuffer_.size()) {
+                asyncFrameBuffer_.erase(asyncFrameBuffer_.begin(), 
+                                      asyncFrameBuffer_.begin() + framesSent);
             }
             
             // 如果缓冲区还有完整帧，继续发送
@@ -421,7 +383,7 @@ public:
      * 
      * @details 建立与指定串口设备的连接，配置波特率并初始化所有内部状态。
      * 该方法会先断开现有连接（如果存在），然后尝试建立新连接。连接成功
-     * 后会初始化异步发送缓冲区和性能统计计数器。
+     * 后会初始化异步发送缓冲区。
      * 
      * @note 波特率设置为3000000(3Mbps)以匹配CAN总线1Mbps的带宽需求，
      * 考虑到串口到CAN转换芯片的协议开销。
@@ -434,17 +396,6 @@ public:
 #ifdef ENABLE_ASYNC_SEND
         asyncFrameBuffer_.clear();
         asyncSending_.store(false, std::memory_order_release);
-        asyncSendBytes_.store(0, std::memory_order_release);
-        asyncSendFrames_.store(0, std::memory_order_release);
-#endif
-        
-        // 重置性能统计
-#ifdef ENABLE_PERF_STATS
-        stats_.totalFramesSent_.store(0, std::memory_order_release);
-        stats_.totalBytesSent_.store(0, std::memory_order_release);
-        stats_.sendErrors_.store(0, std::memory_order_release);
-        stats_.reconnectCount_.store(0, std::memory_order_release);
-        stats_.batchFramesSent_.store(0, std::memory_order_release);
 #endif
         
         return connectInternal();
@@ -490,9 +441,6 @@ public:
         // 异步发送模式 - 严格的周期容量检查（基于帧数量）
         if (asyncFrameBuffer_.size() >= ASYNC_BUFFER_MAX_FRAMES) {
             // 严重错误：周期容量超限，立即丢弃帧
-#ifdef ENABLE_PERF_STATS
-            stats_.frameDropCount_.fetch_add(1, std::memory_order_relaxed);
-#endif
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[ERROR][SerialPortManager::sendFrame]: " 
                       << "帧丢弃！周期容量超限。当前缓冲区: " 
@@ -504,9 +452,6 @@ public:
         
         bool success = asyncSendFrame(frame);
         if (success) {
-#ifdef ENABLE_PERF_STATS
-            stats_.totalFramesSent_.fetch_add(1, std::memory_order_relaxed);
-#endif
 #ifdef ENABLE_SERIAL_DEBUG
             std::cout << "[DEBUG][SerialPortManager]: CAN帧加入异步发送队列. 字节: ";
             for (uint8_t byte : binaryData) {
@@ -530,11 +475,6 @@ public:
             
             boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
             
-#ifdef ENABLE_PERF_STATS
-            stats_.totalFramesSent_.fetch_add(1, std::memory_order_relaxed);
-            stats_.totalBytesSent_.fetch_add(binaryData.size(), std::memory_order_relaxed);
-#endif
-            
 #ifdef ENABLE_SERIAL_DEBUG
             std::cout << "[DEBUG][SerialPortManager]: CAN帧发送成功. 字节: ";
             for (uint8_t byte : binaryData) {
@@ -547,9 +487,6 @@ public:
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_PERF_STATS
-            stats_.sendErrors_.fetch_add(1, std::memory_order_relaxed);
-#endif
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[ERROR][SerialPortManager::sendFrame]: " << e.what() << std::endl;
 #endif
@@ -558,7 +495,6 @@ public:
 #endif // ENABLE_ASYNC_SEND
     }
     
-#ifdef ENABLE_BATCH_OPTIMIZATION
     /**
      * @brief 批量发送CAN帧
      * 
@@ -577,16 +513,6 @@ public:
         
         // 限制批量大小
         size_t actualCount = std::min(frames.size(), MAX_BATCH_FRAMES);
-        
-        // 计算总数据大小
-        size_t totalSize = 0;
-        for (size_t i = 0; i < actualCount; ++i) {
-            totalSize += frames[i].getBinaryFrame().size();
-        }
-        
-        if (totalSize == 0) {
-            return 0;
-        }
         
 #ifdef ENABLE_ASYNC_SEND
         // 异步批量发送（基于帧数量）
@@ -613,11 +539,6 @@ public:
             startAsyncSend();
         }
         
-#ifdef ENABLE_PERF_STATS
-        stats_.totalFramesSent_.fetch_add(actualCount, std::memory_order_relaxed);
-        stats_.batchFramesSent_.fetch_add(actualCount, std::memory_order_relaxed);
-#endif
-        
         return actualCount;
         
 #else
@@ -627,7 +548,7 @@ public:
         try {
             // 构建批量数据缓冲区
             std::vector<uint8_t> batchData;
-            batchData.reserve(totalSize);
+            batchData.reserve(actualCount * CAN_FRAME_SIZE);
             
             for (size_t i = 0; i < actualCount; ++i) {
                 const auto& binaryData = frames[i].getBinaryFrame();
@@ -649,19 +570,10 @@ public:
             // 一次性发送所有数据
             boost::asio::write(*serialPort_, boost::asio::buffer(batchData.data(), batchData.size()));
             
-#ifdef ENABLE_PERF_STATS
-            stats_.totalFramesSent_.fetch_add(actualCount, std::memory_order_relaxed);
-            stats_.totalBytesSent_.fetch_add(batchData.size(), std::memory_order_relaxed);
-            stats_.batchFramesSent_.fetch_add(actualCount, std::memory_order_relaxed);
-#endif
-            
             return actualCount;
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_PERF_STATS
-            stats_.sendErrors_.fetch_add(1, std::memory_order_relaxed);
-#endif
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: " << e.what() << std::endl;
 #endif
@@ -669,7 +581,6 @@ public:
         }
 #endif // ENABLE_ASYNC_SEND
     }
-#endif // ENABLE_BATCH_OPTIMIZATION
     
     /**
      * @brief 线程安全发送原始数据
@@ -739,19 +650,10 @@ public:
      * @return 重连是否成功
      * 
      * @details 先断开当前连接，然后重新建立连接。主要用于错误恢复场景。
-     * 每次重连都会增加重连计数器，便于性能监控和故障诊断。
      */
     bool reconnect() {
         disconnectInternal();
-        bool success = connectInternal();
-        
-#ifdef ENABLE_PERF_STATS
-        if (success) {
-            stats_.reconnectCount_.fetch_add(1, std::memory_order_relaxed);
-        }
-#endif
-        
-        return success;
+        return connectInternal();
     }
     
     /**
@@ -762,88 +664,6 @@ public:
     std::string getPortInfo() const {
         return portName_ + " @ " + std::to_string(baudRate_) + " baud";
     }
-    
-#ifdef ENABLE_PERF_STATS
-    /**
-     * @brief 获取性能统计信息
-     * 
-     * @return 包含所有性能指标的字符串
-     * 
-     * @details 返回格式化的性能统计信息，包括总发送帧数、字节数、错误次数等。
-     * 便于调试和性能监控使用。
-     */
-    std::string getPerformanceStats() const {
-        std::stringstream ss;
-        ss << "Performance Statistics:\n"
-           << "  Total Frames Sent: " << stats_.totalFramesSent_.load(std::memory_order_relaxed) << "\n"
-           << "  Total Bytes Sent: " << stats_.totalBytesSent_.load(std::memory_order_relaxed) << "\n"
-           << "  Send Errors: " << stats_.sendErrors_.load(std::memory_order_relaxed) << "\n"
-           << "  Reconnect Count: " << stats_.reconnectCount_.load(std::memory_order_relaxed) << "\n"
-           << "  Batch Frames Sent: " << stats_.batchFramesSent_.load(std::memory_order_relaxed) << "\n"
-           << "  Frame Drops: " << stats_.frameDropCount_.load(std::memory_order_relaxed) << "\n"
-           << "  Emergency State: " << (isInEmergencyState() ? "YES" : "NO") << "\n";
-        
-#ifdef ENABLE_ASYNC_SEND
-        ss << "  Async Bytes Sent: " << asyncSendBytes_.load(std::memory_order_relaxed) << "\n"
-           << "  Async Frames Sent: " << asyncSendFrames_.load(std::memory_order_relaxed) << "\n"
-           << "  Current Buffer Frames: " << asyncFrameBuffer_.size() << "/" << ASYNC_BUFFER_MAX_FRAMES << " frames\n"
-           << "  Immediate Send Threshold: " << IMMEDIATE_SEND_THRESHOLD << " frames\n"
-           << "  Async Sending: " << (asyncSending_.load(std::memory_order_relaxed) ? "Yes" : "No") << "\n";
-#endif
-        
-        return ss.str();
-    }
-    
-    /**
-     * @brief 重置性能统计计数器
-     * 
-     * @details 将所有性能统计计数器重置为零，便于开始新的性能测试周期。
-     */
-    void resetPerformanceStats() {
-        stats_.totalFramesSent_.store(0, std::memory_order_relaxed);
-        stats_.totalBytesSent_.store(0, std::memory_order_relaxed);
-        stats_.sendErrors_.store(0, std::memory_order_relaxed);
-        stats_.reconnectCount_.store(0, std::memory_order_relaxed);
-        stats_.batchFramesSent_.store(0, std::memory_order_relaxed);
-        stats_.frameDropCount_.store(0, std::memory_order_relaxed);
-        
-#ifdef ENABLE_ASYNC_SEND
-        asyncSendBytes_.store(0, std::memory_order_relaxed);
-        asyncSendFrames_.store(0, std::memory_order_relaxed);
-#endif
-    }
-    
-    /**
-     * @brief 获取帧丢弃计数
-     * 
-     * @return 帧丢弃次数
-     * 
-     * @details 返回自上次重置以来的帧丢弃次数。任何非零值都表示系统
-     * 出现过严重错误，需要立即关注。
-     */
-    uint64_t getFrameDropCount() const {
-#ifdef ENABLE_PERF_STATS
-        return stats_.frameDropCount_.load(std::memory_order_relaxed);
-#else
-        return 0;
-#endif
-    }
-    
-    /**
-     * @brief 检查是否处于紧急状态
-     * 
-     * @return true如果发生过帧丢弃，false否则
-     * 
-     * @details 帧丢弃表明系统稳定性受到威胁，需要立即处理。
-     */
-    bool isInEmergencyState() const {
-#ifdef ENABLE_PERF_STATS
-        return stats_.frameDropCount_.load(std::memory_order_relaxed) > 0;
-#else
-        return false;
-#endif
-    }
-#endif // ENABLE_PERF_STATS
     
     /**
      * @brief 刷新异步发送缓冲区

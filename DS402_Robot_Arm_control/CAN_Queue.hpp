@@ -16,6 +16,7 @@
 #include <queue>
 #include <vector>
 #include <condition_variable>
+#include <memory>
 
 #include <boost/lockfree/queue.hpp>
 
@@ -26,24 +27,27 @@
  * 
  * 单生产单消费模式，由发送线程专用
  * 队列大小：1024帧
+ * 使用原始指针确保平凡可复制性
  */
-extern boost::lockfree::queue<CanFrame> sendQueue;
+extern boost::lockfree::queue<CanFrame*> sendQueue;
 
 /**
  * @brief 接收队列（无锁队列）
  * 
  * 接收线程将数据从缓冲区转移至此队列
  * 队列大小：1024帧
+ * 使用原始指针确保平凡可复制性
  */
-extern boost::lockfree::queue<CanFrame> receiveQueue;
+extern boost::lockfree::queue<CanFrame*> receiveQueue;
 
 /**
  * @brief 规划队列（有锁队列）
  * 
  * 存储规划线程生成的SDO帧
  * 发送线程在每个周期优先处理此队列
+ * 使用shared_ptr确保一致性
  */
-extern std::queue<CanFrame> planQueue;
+extern std::queue<std::shared_ptr<CanFrame>> planQueue;
 extern std::mutex planQueueMutex;
 extern std::condition_variable planQueueCV;
 
@@ -53,7 +57,8 @@ extern std::condition_variable planQueueCV;
  * @return 添加成功返回true，队列满返回false
  */
 inline bool pushToSendQueue(const CanFrame& frame) {
-    return sendQueue.push(frame);
+    CanFrame* framePtr = new CanFrame(frame);
+    return sendQueue.push(framePtr);
 }
 
 /**
@@ -64,9 +69,11 @@ inline bool pushToSendQueue(const CanFrame& frame) {
 inline size_t pushBatchToSendQueue(const std::vector<CanFrame>& frames) {
     size_t count = 0;
     for (const auto& frame : frames) {
-        if (sendQueue.push(frame)) {
+        CanFrame* framePtr = new CanFrame(frame);
+        if (sendQueue.push(framePtr)) {
             ++count;
         } else {
+            delete framePtr; // 队列满时释放内存
             break;
         }
     }
@@ -75,28 +82,28 @@ inline size_t pushBatchToSendQueue(const std::vector<CanFrame>& frames) {
 
 /**
  * @brief 从发送队列取出CAN帧
- * @param frame 输出参数，取出的CAN帧
+ * @param framePtr 输出参数，取出的CAN帧指针
  * @return 取出成功返回true，队列空返回false
  */
-inline bool popFromSendQueue(CanFrame& frame) {
-    return sendQueue.pop(frame);
+inline bool popFromSendQueue(CanFrame*& framePtr) {
+    return sendQueue.pop(framePtr);
 }
 
 /**
  * @brief 批量从发送队列取出CAN帧
- * @param frames 输出参数，取出的CAN帧向量
+ * @param framePtrs 输出参数，取出的CAN帧指针向量
  * @param maxCount 最大取出数量
  * @return 实际取出的帧数量
  */
-inline size_t popBatchFromSendQueue(std::vector<CanFrame>& frames, size_t maxCount) {
-    frames.clear();
-    frames.reserve(maxCount);
+inline size_t popBatchFromSendQueue(std::vector<CanFrame*>& framePtrs, size_t maxCount) {
+    framePtrs.clear();
+    framePtrs.reserve(maxCount);
     
-    CanFrame frame;
+    CanFrame* framePtr = nullptr;
     size_t count = 0;
     
-    while (count < maxCount && sendQueue.pop(frame)) {
-        frames.push_back(frame);
+    while (count < maxCount && sendQueue.pop(framePtr)) {
+        framePtrs.push_back(framePtr);
         ++count;
     }
     
@@ -118,7 +125,8 @@ inline bool isSendQueueEmpty() {
  * @return 添加成功返回true，队列满返回false
  */
 inline bool pushToReceiveQueue(const CanFrame& frame) {
-    return receiveQueue.push(frame);
+    CanFrame* framePtr = new CanFrame(frame);
+    return receiveQueue.push(framePtr);
 }
 
 /**
@@ -129,9 +137,11 @@ inline bool pushToReceiveQueue(const CanFrame& frame) {
 inline size_t pushBatchToReceiveQueue(const std::vector<CanFrame>& frames) {
     size_t count = 0;
     for (const auto& frame : frames) {
-        if (receiveQueue.push(frame)) {
+        CanFrame* framePtr = new CanFrame(frame);
+        if (receiveQueue.push(framePtr)) {
             ++count;
         } else {
+            delete framePtr; // 队列满时释放内存
             break;
         }
     }
@@ -140,28 +150,28 @@ inline size_t pushBatchToReceiveQueue(const std::vector<CanFrame>& frames) {
 
 /**
  * @brief 从接收队列取出CAN帧
- * @param frame 输出参数，取出的CAN帧
+ * @param framePtr 输出参数，取出的CAN帧指针
  * @return 取出成功返回true，队列空返回false
  */
-inline bool popFromReceiveQueue(CanFrame& frame) {
-    return receiveQueue.pop(frame);
+inline bool popFromReceiveQueue(CanFrame*& framePtr) {
+    return receiveQueue.pop(framePtr);
 }
 
 /**
  * @brief 批量从接收队列取出CAN帧
- * @param frames 输出参数，CAN帧向量取出后放到这里
+ * @param framePtrs 输出参数，CAN帧指针向量
  * @param maxCount 最大取出数量
  * @return 实际取出的帧数量
  */
-inline size_t popBatchFromReceiveQueue(std::vector<CanFrame>& frames, size_t maxCount) {
-    frames.clear();
-    frames.reserve(maxCount);
+inline size_t popBatchFromReceiveQueue(std::vector<CanFrame*>& framePtrs, size_t maxCount) {
+    framePtrs.clear();
+    framePtrs.reserve(maxCount);
     
-    CanFrame frame;
+    CanFrame* framePtr = nullptr;
     size_t count = 0;
     
-    while (count < maxCount && receiveQueue.pop(frame)) {
-        frames.push_back(frame);
+    while (count < maxCount && receiveQueue.pop(framePtr)) {
+        framePtrs.push_back(framePtr);
         ++count;
     }
     
@@ -183,7 +193,7 @@ inline bool isReceiveQueueEmpty() {
  */
 inline void pushToPlanQueue(const CanFrame& frame) {
     std::lock_guard<std::mutex> lock(planQueueMutex);
-    planQueue.push(frame);
+    planQueue.push(std::make_shared<CanFrame>(frame));
     planQueueCV.notify_one();
 }
 
@@ -194,7 +204,7 @@ inline void pushToPlanQueue(const CanFrame& frame) {
 inline void pushBatchToPlanQueue(const std::vector<CanFrame>& frames) {
     std::lock_guard<std::mutex> lock(planQueueMutex);
     for (const auto& frame : frames) {
-        planQueue.push(frame);
+        planQueue.push(std::make_shared<CanFrame>(frame));
     }
     if (!frames.empty()) {
         planQueueCV.notify_one();
@@ -203,11 +213,11 @@ inline void pushBatchToPlanQueue(const std::vector<CanFrame>& frames) {
 
 /**
  * @brief 从规划队列取出SDO帧
- * @param frame 输出参数，取出的SDO帧
+ * @param framePtr 输出参数，取出的SDO帧智能指针
  * @param timeoutMs 超时时间（毫秒），0表示不等待
  * @return 取出成功返回true，超时或队列空返回false
  */
-inline bool popFromPlanQueue(CanFrame& frame, uint32_t timeoutMs = 0) {
+inline bool popFromPlanQueue(std::shared_ptr<CanFrame>& framePtr, uint32_t timeoutMs = 0) {
     std::unique_lock<std::mutex> lock(planQueueMutex);
     
     if (timeoutMs == 0) {
@@ -221,25 +231,25 @@ inline bool popFromPlanQueue(CanFrame& frame, uint32_t timeoutMs = 0) {
         }
     }
     
-    frame = planQueue.front();
+    framePtr = planQueue.front();
     planQueue.pop();
     return true;
 }
 
 /**
  * @brief 批量从规划队列取出SDO帧
- * @param frames 输出参数，取出的SDO帧向量
+ * @param framePtrs 输出参数，取出的SDO帧智能指针向量
  * @param maxCount 最大取出数量
  * @return 实际取出的帧数量
  */
-inline size_t popBatchFromPlanQueue(std::vector<CanFrame>& frames, size_t maxCount) {
+inline size_t popBatchFromPlanQueue(std::vector<std::shared_ptr<CanFrame>>& framePtrs, size_t maxCount) {
     std::lock_guard<std::mutex> lock(planQueueMutex);
     
-    frames.clear();
+    framePtrs.clear();
     size_t count = 0;
     
     while (count < maxCount && !planQueue.empty()) {
-        frames.push_back(planQueue.front());
+        framePtrs.push_back(planQueue.front());
         planQueue.pop();
         ++count;
     }
@@ -271,10 +281,14 @@ inline void clearPlanQueue() {
  * @brief 清空所有队列
  */
 inline void clearAllQueues() {
-    // 清空无锁队列
-    CanFrame dummy;
-    while (sendQueue.pop(dummy)) {}
-    while (receiveQueue.pop(dummy)) {}
+    // 清空无锁队列并释放内存
+    CanFrame* dummy = nullptr;
+    while (sendQueue.pop(dummy)) {
+        delete dummy;
+    }
+    while (receiveQueue.pop(dummy)) {
+        delete dummy;
+    }
     
     // 清空有锁队列
     clearPlanQueue();

@@ -6,7 +6,9 @@
       "Bash(find:*)",
       "Bash(grep:*)",
       "Bash(done)",
-      "Bash(g++:*)"
+      "Bash(g++:*)",
+      "Bash(cl test_serial.cpp:*)",
+      "Bash(cl:*)"
     ],
     "deny": [],
     "ask": []
