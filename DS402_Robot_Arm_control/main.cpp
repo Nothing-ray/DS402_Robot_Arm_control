@@ -41,7 +41,7 @@ int main(){
         Motor(4), Motor(5), Motor(6) };
     
 
-    SerialPortManager serial;
+    //SerialPortManager serial;
 
     // 执行测试
     //testMotorClass(motors);
@@ -63,7 +63,8 @@ int main(){
 
     //testSdoTimeoutRetryMechanism();
 
-    //testSerialBasicSend("COM3");
+    //testSerialBasicSend("COM9");
+    testSerialBatchSend("COM9");
 
 	return 0;
 }

@@ -52,7 +52,7 @@
 
 /// 启用异步发送功能（推荐开启）
 #ifndef DISABLE_ASYNC_SEND
-#define ENABLE_ASYNC_SEND
+//#define ENABLE_ASYNC_SEND
 #endif
 
 /**

@@ -8,7 +8,8 @@
       "Bash(done)",
       "Bash(g++:*)",
       "Bash(cl test_serial.cpp:*)",
-      "Bash(cl:*)"
+      "Bash(cl:*)",
+      "Bash(test_batch.exe)"
     ],
     "deny": [],
     "ask": []
