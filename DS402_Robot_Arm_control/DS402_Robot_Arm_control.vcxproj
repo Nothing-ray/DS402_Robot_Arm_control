@@ -153,7 +153,6 @@
     <ClInclude Include="test\test_SDO_State_Machine.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="CAN_Queue.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

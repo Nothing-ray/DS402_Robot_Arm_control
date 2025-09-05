@@ -34,7 +34,8 @@
 
 *.txt
 
-/DS402_Robot_Arm_control/.vs
-/DS402_Robot_Arm_control/x64
+**/.vs
+**/x64
 /DS402_Ro.00540d7d
 /DS402_Robot_Arm_control/DS402_Ro.00540d7d
+**/.claude/

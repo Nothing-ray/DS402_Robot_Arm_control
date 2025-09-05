@@ -54,12 +54,12 @@
     <ClInclude Include="CAN_Queue.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="Serial_Module.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="CAN_Queue.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

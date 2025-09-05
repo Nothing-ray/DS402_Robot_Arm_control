@@ -36,6 +36,7 @@
 #include <algorithm>    // 添加算法支持
 
 #include "CAN_frame.hpp"
+#include "CircularBuffer.hpp"
 
 // ====================== 编译配置宏 ====================== //
 
@@ -52,7 +53,7 @@
 
 /// 启用异步发送功能（推荐开启）
 #ifndef DISABLE_ASYNC_SEND
-//#define ENABLE_ASYNC_SEND
+#define ENABLE_ASYNC_SEND
 #endif
 
 /**
@@ -64,14 +65,17 @@
 /// 单周期最大帧数量（6电机 × 4PDO帧）
 constexpr size_t SINGLE_CYCLE_FRAME_COUNT = 24;
 
-/// 立即发送阈值（半周期帧数量）
-constexpr size_t IMMEDIATE_SEND_THRESHOLD = 12;
+/// 立即发送阈值（四分之一周期帧数量）
+constexpr size_t IMMEDIATE_SEND_THRESHOLD = 6;
+
+/// 立即发送字节数阈值（6帧 × 13字节）
+constexpr size_t IMMEDIATE_SEND_THRESHOLD_BYTES = IMMEDIATE_SEND_THRESHOLD * CAN_FRAME_SIZE;
 
 /// 异步发送缓冲区最大帧数量（严格单周期限制）
 constexpr size_t ASYNC_BUFFER_MAX_FRAMES = SINGLE_CYCLE_FRAME_COUNT;
 
-/// 单帧固定大小（13字节）
-constexpr size_t CAN_FRAME_SIZE = 13;
+// 使用CircularBuffer.hpp中定义的CAN_FRAME_SIZE
+// constexpr size_t CAN_FRAME_SIZE = 13;
 
 /// 最大批量帧数量
 constexpr size_t MAX_BATCH_FRAMES = 24;
@@ -138,7 +142,7 @@ private:
     
     // 异步发送相关成员
 #ifdef ENABLE_ASYNC_SEND
-    std::deque<CanFrame> asyncFrameBuffer_;         ///< 异步发送帧缓冲区（按完整帧存储）
+    CircularBuffer asyncFrameBuffer_;               ///< 异步发送帧缓冲区（二进制数据存储）
     std::atomic<bool> asyncSending_{false};         ///< 异步发送进行中标志
 #endif
     
@@ -212,38 +216,16 @@ private:
             connected_.store(false, std::memory_order_release);
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[ERROR][SerialPortManager::handleAsyncSendComplete]: " 
-                      << error.message() << std::endl;
+                      << error.message() << "，传输字节数: " << bytesTransferred << std::endl;
 #endif
+            
+            // 错误时清空缓冲区，防止数据不一致
+            asyncFrameBuffer_.clear();
+            return;
         } else {
-            // 计算发送的完整帧数量和可能的剩余字节
-            size_t framesSent = bytesTransferred / CAN_FRAME_SIZE;
-            size_t remainingBytes = bytesTransferred % CAN_FRAME_SIZE;
-            
-            // 处理可能的帧边界错误（剩余字节不为0）
-            if (remainingBytes > 0) {
-                // 严重错误：帧边界不完整，可能导致后续数据错位
-                connected_.store(false, std::memory_order_release);
-                
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cerr << "[CRITICAL][SerialPortManager::handleAsyncSendComplete]: " 
-                          << "帧边界错误！传输字节数(" << bytesTransferred 
-                          << ")不是13字节的整数倍，剩余字节: " << remainingBytes 
-                          << "。串口连接已断开以确保数据完整性。" << std::endl;
-#endif
-                
-                // 清空缓冲区防止数据错位
-                asyncFrameBuffer_.clear();
-                return; // 不再继续发送
-            }
-            
-            // 清除已发送的完整帧
-            if (framesSent > 0 && framesSent <= asyncFrameBuffer_.size()) {
-                asyncFrameBuffer_.erase(asyncFrameBuffer_.begin(), 
-                                      asyncFrameBuffer_.begin() + framesSent);
-            }
-            
-            // 如果缓冲区还有完整帧，继续发送
-            if (!asyncFrameBuffer_.empty()) {
+            // 使用环形缓冲区的popBytes接口清除已发送的数据
+            // 由于环形缓冲区自动管理读写位置，这里只需要检查是否还有数据
+            if (asyncFrameBuffer_.getUsedSpace() > 0) {
                 startAsyncSend();
             }
         }
@@ -263,38 +245,35 @@ private:
      * - 任何帧边界错误都会触发连接断开和数据清空
      */
     void startAsyncSend() {
-        if (asyncFrameBuffer_.empty() || !isConnected()) {
+        if (asyncFrameBuffer_.isEmpty() || !isConnected()) {
             return;
         }
         
         asyncSending_.store(true, std::memory_order_release);
         
         try {
-            // 发送缓冲区中的所有完整帧（确保帧完整性）
-            std::vector<uint8_t> sendData;
-            
-            // 预分配精确内存以避免动态扩容
-            sendData.reserve(asyncFrameBuffer_.size() * CAN_FRAME_SIZE);
-            
-            for (const auto& frame : asyncFrameBuffer_) {
-                const auto& binaryData = frame.getBinaryFrame();
-                
-                // 完整性验证：每个帧必须是13字节
-                if (binaryData.size() != CAN_FRAME_SIZE) {
-                    throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
-                                           std::to_string(binaryData.size()) + "字节");
-                }
-                
-                sendData.insert(sendData.end(), binaryData.begin(), binaryData.end());
+            // 获取环形缓冲区中可用的数据大小
+            size_t bytesToSend = asyncFrameBuffer_.getUsedSpace();
+            if (bytesToSend == 0) {
+                return;
             }
             
-            // 最终完整性检查：总字节数必须是13的整数倍
-            if (sendData.size() % CAN_FRAME_SIZE != 0) {
+            // 创建发送缓冲区并直接从环形缓冲区读取数据
+            std::vector<uint8_t> sendData(bytesToSend);
+            size_t bytesRead = asyncFrameBuffer_.popBytes(sendData.data(), bytesToSend);
+            
+            if (bytesRead == 0) {
+                return;
+            }
+            
+            // 完整性验证：数据大小必须是13的倍数
+            if (bytesRead % CAN_FRAME_SIZE != 0) {
                 throw std::runtime_error("内部错误：发送数据总长度不是13字节的整数倍");
             }
             
-            serialPort_->async_write_some(
-                boost::asio::buffer(sendData.data(), sendData.size()),
+            boost::asio::async_write(
+                *serialPort_,
+                boost::asio::buffer(sendData.data(), bytesRead),
                 [this](const boost::system::error_code& error, size_t bytesTransferred) {
                     handleAsyncSendComplete(error, bytesTransferred);
                 }
@@ -322,8 +301,15 @@ private:
         
         std::lock_guard<std::mutex> lock(sendMutex_);
         
+        // 帧完整性验证：确保每个CAN帧都是完整的13字节
+        const auto& binaryData = frame.getBinaryFrame();
+        if (binaryData.size() != CAN_FRAME_SIZE) {
+            throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
+                                   std::to_string(binaryData.size()) + "字节");
+        }
+        
         // 严格周期容量检查 - 不允许超过单周期帧数量
-        if (asyncFrameBuffer_.size() >= ASYNC_BUFFER_MAX_FRAMES) {
+        if (asyncFrameBuffer_.getUsedSpace() + CAN_FRAME_SIZE > asyncFrameBuffer_.getCapacity()) {
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[WARN][SerialPortManager::asyncSendFrame]: 周期帧容量超限，丢弃帧" << std::endl;
 #endif
@@ -331,10 +317,12 @@ private:
         }
         
         // 添加完整帧到缓冲区
-        asyncFrameBuffer_.push_back(frame);
+        if (!asyncFrameBuffer_.pushFrame(frame)) {
+            return false;
+        }
         
-        // 达到半周期帧数量或当前没有发送操作，立即启动发送
-        if (asyncFrameBuffer_.size() >= IMMEDIATE_SEND_THRESHOLD || !asyncSending_.load(std::memory_order_acquire)) {
+        // 达到半周期字节数或当前没有发送操作，立即启动发送
+        if (asyncFrameBuffer_.getUsedSpace() >= IMMEDIATE_SEND_THRESHOLD_BYTES || !asyncSending_.load(std::memory_order_acquire)) {
             startAsyncSend();
         }
         
@@ -438,14 +426,14 @@ public:
         const std::vector<uint8_t>& binaryData = frame.getBinaryFrame();
         
 #ifdef ENABLE_ASYNC_SEND
-        // 异步发送模式 - 严格的周期容量检查（基于帧数量）
-        if (asyncFrameBuffer_.size() >= ASYNC_BUFFER_MAX_FRAMES) {
+        // 异步发送模式 - 严格的周期容量检查（基于字节数）
+        if (asyncFrameBuffer_.getUsedSpace() + CAN_FRAME_SIZE > asyncFrameBuffer_.getCapacity()) {
             // 严重错误：周期容量超限，立即丢弃帧
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[ERROR][SerialPortManager::sendFrame]: " 
                       << "帧丢弃！周期容量超限。当前缓冲区: " 
-                      << asyncFrameBuffer_.size() << "帧，周期限制: " 
-                      << ASYNC_BUFFER_MAX_FRAMES << "帧" << std::endl;
+                      << asyncFrameBuffer_.getUsedSpace() << "字节，周期限制: " 
+                      << asyncFrameBuffer_.getCapacity() << "字节" << std::endl;
 #endif
             throw std::runtime_error("串口周期容量超限 - 数据帧丢弃，实时性受威胁");
         }
@@ -518,28 +506,36 @@ public:
         // 异步批量发送（基于帧数量）
         std::lock_guard<std::mutex> lock(sendMutex_);
         
-        // 检查缓冲区容量 - 基于帧数量
-        if (asyncFrameBuffer_.size() + actualCount > ASYNC_BUFFER_MAX_FRAMES) {
+        // 检查缓冲区容量 - 基于字节数
+        size_t requiredSpace = actualCount * CAN_FRAME_SIZE;
+        if (asyncFrameBuffer_.getUsedSpace() + requiredSpace > asyncFrameBuffer_.getCapacity()) {
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[WARN][SerialPortManager::sendFramesBatch]: 批量帧丢弃！周期容量超限。"
-                      << "当前缓冲区: " << asyncFrameBuffer_.size() << "帧，"
+                      << "当前缓冲区: " << asyncFrameBuffer_.getUsedSpace() << "字节，"
                       << "批量帧数: " << actualCount << "帧，"
-                      << "周期限制: " << ASYNC_BUFFER_MAX_FRAMES << "帧" << std::endl;
+                      << "周期限制: " << asyncFrameBuffer_.getCapacity() << "字节" << std::endl;
 #endif
             return 0;
         }
         
-        // 添加所有完整帧到缓冲区
+        // 帧完整性验证：确保所有CAN帧都是完整的13字节
         for (size_t i = 0; i < actualCount; ++i) {
-            asyncFrameBuffer_.push_back(frames[i]);
+            const auto& binaryData = frames[i].getBinaryFrame();
+            if (binaryData.size() != CAN_FRAME_SIZE) {
+                throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
+                                       std::to_string(binaryData.size()) + "字节");
+            }
         }
         
-        // 触发发送（达到半周期或当前没有发送操作）
-        if (asyncFrameBuffer_.size() >= IMMEDIATE_SEND_THRESHOLD || !asyncSending_.load(std::memory_order_acquire)) {
+        // 批量添加所有帧到缓冲区
+        size_t successCount = asyncFrameBuffer_.pushFrames(frames);
+        
+        // 触发发送（达到半周期字节数或当前没有发送操作）
+        if (asyncFrameBuffer_.getUsedSpace() >= IMMEDIATE_SEND_THRESHOLD_BYTES || !asyncSending_.load(std::memory_order_acquire)) {
             startAsyncSend();
         }
         
-        return actualCount;
+        return successCount;
         
 #else
         // 同步批量发送
@@ -675,7 +671,7 @@ public:
      */
     bool flushAsyncBuffer() {
 #ifdef ENABLE_ASYNC_SEND
-        if (!isConnected() || asyncFrameBuffer_.empty()) {
+        if (!isConnected() || asyncFrameBuffer_.isEmpty()) {
             return false;
         }
         
@@ -696,7 +692,7 @@ public:
      */
     size_t getBufferSize() const {
 #ifdef ENABLE_ASYNC_SEND
-        return asyncFrameBuffer_.size() * CAN_FRAME_SIZE;
+        return asyncFrameBuffer_.getUsedSpace();
 #else
         return 0;
 #endif

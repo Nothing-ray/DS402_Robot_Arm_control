@@ -9,7 +9,8 @@
       "Bash(g++:*)",
       "Bash(cl test_serial.cpp:*)",
       "Bash(cl:*)",
-      "Bash(test_batch.exe)"
+      "Read(/F:\\刀客塔\\工程和任务\\第二代手臂通信\\DS402_Robot_Arm_control\\DS402_Robot_Arm_control/**)",
+      "Read(/F:\\刀客塔\\工程和任务\\第二代手臂通信\\DS402_Robot_Arm_control\\DS402_Robot_Arm_control/**)"
     ],
     "deny": [],
     "ask": []

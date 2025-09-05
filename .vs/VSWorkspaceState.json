@@ -1,8 +1,10 @@
 {
   "ExpandedNodes": [
     "",
-    "\\DS402_Robot_Arm_control"
+    "\\DS402_Robot_Arm_control",
+    "\\DS402_Robot_Arm_control\\test",
+    "\\DS402_Robot_Arm_control\\x64"
   ],
-  "SelectedNode": "\\README.md",
+  "SelectedNode": "\\DS402_Robot_Arm_control\\main.cpp",
   "PreviewInSolutionExplorer": false
 }
