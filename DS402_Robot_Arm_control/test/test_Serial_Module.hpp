@@ -178,28 +178,137 @@ inline void testSerialBatchSend(const std::string& portName = "COM1") {
     size_t successCount = 0;
     size_t failCount = 0;
     
+    // 开始计时（纳秒精度）
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
     for (size_t i = 0; i < testFrames.size(); ++i) {
         const auto& frame = testFrames[i];
         
         if (serial.sendFrame(frame)) {
             successCount++;
-            std::cout << "发送成功: 帧" << i 
-                      << " - ID=0x" << std::hex << frame.frameID 
-                      << ", DLC=" << std::dec << static_cast<int>(frame.dlc) << std::endl;
         } else {
             failCount++;
-            std::cerr << "发送失败: 帧" << i << std::endl;
         }
         
         // 添加小延迟避免发送过快
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        //std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    
+    // 结束计时并计算耗时（纳秒转换为微秒）
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+    double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
     
     std::cout << "批量发送完成 - 成功: " << successCount 
               << ", 失败: " << failCount << std::endl;
+    std::cout << "批量发送总耗时: " << std::fixed << std::setprecision(2) 
+              << elapsedTimeUs << " us" << std::endl;
+    std::cout << "平均每帧耗时: " << std::fixed << std::setprecision(2) 
+              << (successCount > 0 ? elapsedTimeUs / successCount : 0) << " us/帧" << std::endl;
     
     serial.disconnect();
     std::cout << "批量发送测试结束" << std::endl;
+}
+
+/**
+ * @brief 真正的批量发送测试函数（使用sendFramesBatch方法）
+ * 
+ * @details 使用SerialPortManager的sendFramesBatch方法进行真正的批量发送测试，
+ *          而不是逐帧发送。这样可以测试批量发送的性能优势。
+ * 
+ * @param portName 串口设备名称，默认"COM1"
+ */
+inline void testSerialRealBatchSend(const std::string& portName = "COM1") {
+    SerialPortManager serial;
+    
+    // 连接串口
+    if (!serial.connect(portName)) {
+        std::cerr << "[ERROR][testSerialRealBatchSend]: 串口连接失败 - " << portName << std::endl;
+        return;
+    }
+    
+    std::cout << "[INFO][testSerialRealBatchSend]: 串口连接成功" << std::endl;
+    
+    // 生成所有电机的PDO测试帧
+    std::vector<CanFrame> testFrames;
+    
+    // 为6个电机生成PDO帧
+    for (uint8_t motorID = 1; motorID <= 6; ++motorID) {
+        // 为每个电机生成测试数据（递增的值）
+        uint32_t positionValue = 1000 * motorID;
+        uint16_t velocityValue = 500 * motorID;
+        uint16_t currentValue = 100 * motorID;
+        uint16_t controlWord = 0x0006; // 标准控制字
+        uint16_t statusWord = 0x0237;  // 标准状态字
+        
+        // 电机1的PDO帧
+        // RPDO1: 目标位置 + 控制字
+        testFrames.push_back(createCanFrame(0x200 + motorID, {
+            static_cast<uint8_t>((positionValue >> 24) & 0xFF),
+            static_cast<uint8_t>((positionValue >> 16) & 0xFF),
+            static_cast<uint8_t>((positionValue >> 8) & 0xFF),
+            static_cast<uint8_t>(positionValue & 0xFF),
+            static_cast<uint8_t>((controlWord >> 8) & 0xFF),
+            static_cast<uint8_t>(controlWord & 0xFF)
+        }, 6));
+        
+        // RPDO2: 目标速度 + 目标电流
+        testFrames.push_back(createCanFrame(0x300 + motorID, {
+            static_cast<uint8_t>((velocityValue >> 8) & 0xFF),
+            static_cast<uint8_t>(velocityValue & 0xFF),
+            static_cast<uint8_t>((currentValue >> 8) & 0xFF),
+            static_cast<uint8_t>(currentValue & 0xFF)
+        }, 4));
+        
+        // TPDO1: 实际位置 + 状态字
+        testFrames.push_back(createCanFrame(0x180 + motorID, {
+            static_cast<uint8_t>((positionValue >> 24) & 0xFF),
+            static_cast<uint8_t>((positionValue >> 16) & 0xFF),
+            static_cast<uint8_t>((positionValue >> 8) & 0xFF),
+            static_cast<uint8_t>(positionValue & 0xFF),
+            static_cast<uint8_t>((statusWord >> 8) & 0xFF),
+            static_cast<uint8_t>(statusWord & 0xFF)
+        }, 6));
+        
+        // TPDO2: 实际速度 + 实际电流
+        testFrames.push_back(createCanFrame(0x280 + motorID, {
+            static_cast<uint8_t>((velocityValue >> 8) & 0xFF),
+            static_cast<uint8_t>(velocityValue & 0xFF),
+            static_cast<uint8_t>((currentValue >> 8) & 0xFF),
+            static_cast<uint8_t>(currentValue & 0xFF)
+        }, 4));
+    }
+    
+    // 添加同步帧作为结束标志
+    testFrames.push_back(createCanFrame(0x080, {0x00}, 1));
+    
+    std::cout << "生成了 " << testFrames.size() << " 个测试帧" << std::endl;
+    std::cout << "开始真正的批量发送测试..." << std::endl;
+    
+    // 开始计时（纳秒精度）
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    // 使用真正的批量发送方法
+    size_t successCount = serial.sendFramesBatch(testFrames);
+    
+    // 结束计时并计算耗时（纳秒转换为微秒）
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+    double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
+    
+    size_t failCount = testFrames.size() - successCount;
+    
+    std::cout << "真正的批量发送完成 - 成功: " << successCount 
+              << ", 失败: " << failCount << std::endl;
+    std::cout << "批量发送总耗时: " << std::fixed << std::setprecision(2) 
+              << elapsedTimeUs << " us" << std::endl;
+    std::cout << "平均每帧耗时: " << std::fixed << std::setprecision(2) 
+              << (successCount > 0 ? elapsedTimeUs / successCount : 0) << " us/帧" << std::endl;
+    std::cout << "批量发送吞吐量: " << std::fixed << std::setprecision(2) 
+              << (successCount > 0 ? (successCount * 1000000.0) / elapsedTimeUs : 0) << " 帧/秒" << std::endl;
+    
+    serial.disconnect();
+    std::cout << "真正的批量发送测试结束" << std::endl;
 }
 
 #endif // TEST_SERIAL_MODULE_HPP

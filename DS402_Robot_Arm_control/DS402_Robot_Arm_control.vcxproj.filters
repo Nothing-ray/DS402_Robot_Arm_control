@@ -13,6 +13,9 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="头文件\测试">
+      <UniqueIdentifier>{f54bc092-02f0-41b4-91e2-de736825594e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CLASS_Motor.hpp">
@@ -39,23 +42,26 @@
     <ClInclude Include="Read_Thread.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="test\test_CLASS_Motor.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="test\test_PDO_config.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="test\test_PDO_processing.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="test\test_SDO_State_Machine.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="CAN_Queue.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="Serial_Module.hpp">
       <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CircularBuffer.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_SDO_State_Machine.hpp">
+      <Filter>头文件\测试</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_PDO_processing.hpp">
+      <Filter>头文件\测试</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_PDO_config.hpp">
+      <Filter>头文件\测试</Filter>
+    </ClInclude>
+    <ClInclude Include="test\test_CLASS_Motor.hpp">
+      <Filter>头文件\测试</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

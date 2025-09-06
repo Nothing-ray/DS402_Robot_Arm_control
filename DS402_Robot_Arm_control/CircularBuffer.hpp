@@ -72,6 +72,9 @@ private:
     alignas(64) std::condition_variable notEmpty_;
     alignas(64) std::condition_variable notFull_;
     
+    // 第五缓存行：缓冲区操作互斥锁（新增）
+    alignas(64) std::mutex bufferMutex_;
+    
     /**
      * @brief 计算环形索引（位运算优化）
      * @param index 原始索引
@@ -146,12 +149,15 @@ public:
     bool pushBytes(const uint8_t* data, size_t size) {
         validateFrameSize(size);
         
-        std::unique_lock<std::mutex> lock(control_.mutex_);
+        std::unique_lock<std::mutex> controlLock(control_.mutex_);
         
         // 等待缓冲区有足够空间
-        notFull_.wait(lock, [this, size] { 
+        notFull_.wait(controlLock, [this, size] { 
             return (CIRCULAR_BUFFER_CAPACITY - control_.used_) >= size; 
         });
+        
+        // 获取缓冲区操作锁
+        std::unique_lock<std::mutex> bufferLock(bufferMutex_);
         
         // 计算写入位置和连续空间
         uint32_t writeIndex = maskIndex(writer_.writePos_);
@@ -166,9 +172,15 @@ public:
             std::memcpy(&buffer_[0], data + contiguousSpace, size - contiguousSpace);
         }
         
+        // 内存屏障：确保memcpy操作对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
+        
         // 更新写位置和已使用空间
         writer_.writePos_ += size;
         control_.used_ += size;
+        
+        // 内存屏障：确保状态更新对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
         
         // 通知等待的读取线程
         notEmpty_.notify_one();
@@ -183,14 +195,26 @@ public:
      * @return 实际取出的字节数
      */
     size_t popBytes(uint8_t* buffer, size_t maxSize) {
-        std::unique_lock<std::mutex> lock(control_.mutex_);
+        std::unique_lock<std::mutex> controlLock(control_.mutex_);
         
         if (control_.used_ == 0) {
             return 0;
         }
         
-        // 计算实际可读取的字节数
+        // 计算实际可读取的字节数 - 确保是13的倍数
         uint32_t bytesToRead = std::min(static_cast<uint32_t>(maxSize), control_.used_);
+        
+        // 确保读取的字节数是完整帧的倍数
+        if (bytesToRead % CAN_FRAME_SIZE != 0) {
+            // 向下取整到最近的完整帧边界
+            bytesToRead = (bytesToRead / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
+            if (bytesToRead == 0) {
+                return 0; // 没有完整的帧
+            }
+        }
+        
+        // 获取缓冲区操作锁
+        std::unique_lock<std::mutex> bufferLock(bufferMutex_);
         
         // 计算读取位置和连续空间
         uint32_t readIndex = maskIndex(reader_.readPos_);
@@ -205,9 +229,15 @@ public:
             std::memcpy(buffer + contiguousSpace, &buffer_[0], bytesToRead - contiguousSpace);
         }
         
+        // 内存屏障：确保memcpy操作对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
+        
         // 更新读位置和已使用空间
         reader_.readPos_ += bytesToRead;
         control_.used_ -= bytesToRead;
+        
+        // 内存屏障：确保状态更新对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
         
         // 通知等待的写入线程
         notFull_.notify_one();
@@ -223,13 +253,13 @@ public:
      * @return 实际取出的字节数
      */
     size_t popBytesBlocking(uint8_t* buffer, size_t maxSize, uint32_t timeoutMs = 0) {
-        std::unique_lock<std::mutex> lock(control_.mutex_);
+        std::unique_lock<std::mutex> controlLock(control_.mutex_);
         
         // 等待数据可用
         if (timeoutMs == 0) {
-            notEmpty_.wait(lock, [this] { return control_.used_ > 0; });
+            notEmpty_.wait(controlLock, [this] { return control_.used_ > 0; });
         } else {
-            if (!notEmpty_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+            if (!notEmpty_.wait_for(controlLock, std::chrono::milliseconds(timeoutMs),
                                   [this] { return control_.used_ > 0; })) {
                 return 0; // 超时
             }
@@ -240,8 +270,20 @@ public:
             return 0;
         }
         
-        // 计算实际可读取的字节数
+        // 计算实际可读取的字节数 - 确保是13的倍数
         uint32_t bytesToRead = std::min(static_cast<uint32_t>(maxSize), control_.used_);
+        
+        // 确保读取的字节数是完整帧的倍数
+        if (bytesToRead % CAN_FRAME_SIZE != 0) {
+            // 向下取整到最近的完整帧边界
+            bytesToRead = (bytesToRead / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
+            if (bytesToRead == 0) {
+                return 0; // 没有完整的帧
+            }
+        }
+        
+        // 获取缓冲区操作锁
+        std::unique_lock<std::mutex> bufferLock(bufferMutex_);
         
         // 计算读取位置和连续空间
         uint32_t readIndex = maskIndex(reader_.readPos_);
@@ -256,9 +298,15 @@ public:
             std::memcpy(buffer + contiguousSpace, &buffer_[0], bytesToRead - contiguousSpace);
         }
         
+        // 内存屏障：确保memcpy操作对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
+        
         // 更新读位置和已使用空间
         reader_.readPos_ += bytesToRead;
         control_.used_ -= bytesToRead;
+        
+        // 内存屏障：确保状态更新对其他线程可见
+        std::atomic_thread_fence(std::memory_order_release);
         
         // 通知等待的写入线程
         notFull_.notify_one();
