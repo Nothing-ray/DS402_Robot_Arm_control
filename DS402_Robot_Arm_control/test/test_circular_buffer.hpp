@@ -264,3 +264,34 @@ void testBatchTheoreticalPerformance() {
     std::cout << "- 理论吞吐量: " << std::fixed << std::setprecision(2) << mbPerSecond << " MB/s" << std::endl;
     std::cout << "✓ 批量操作性能测试完成" << std::endl;
 }
+
+/**
+ * @brief 测试环形缓冲区调试输出功能
+ * 
+ * @details 此测试需要手动启用CIRCULAR_BUFFER_DEBUG宏来验证调试输出
+ */
+void testDebugOutput() {
+    std::cout << "\n=== 测试调试输出功能 ===" << std::endl;
+    
+    // 注意：此测试需要编译时定义CIRCULAR_BUFFER_DEBUG=1才能看到输出
+    std::cout << "注意：调试输出测试需要编译时启用CIRCULAR_BUFFER_DEBUG宏" << std::endl;
+    std::cout << "编译命令示例: g++ -DCIRCULAR_BUFFER_DEBUG=1 ..." << std::endl;
+    
+    CircularBuffer buffer;
+    
+    // 创建测试CAN帧
+    uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
+    CanFrame frame(0x100, data, 4);
+    
+    // 测试添加帧（如果调试启用会有输出）
+    bool pushResult = buffer.pushFrame(frame);
+    assert(pushResult);
+    
+    // 测试取出数据（如果调试启用会有输出）
+    std::vector<uint8_t> readBuffer(CAN_FRAME_SIZE);
+    uint32_t bytesRead = buffer.popBytes(readBuffer.data(), readBuffer.size());
+    assert(bytesRead == CAN_FRAME_SIZE);
+    
+    std::cout << "✓ 调试输出框架测试完成（请检查编译时是否启用调试宏）" << std::endl;
+    std::cout << "如果启用CIRCULAR_BUFFER_DEBUG，应该看到详细的读写操作输出" << std::endl;
+}

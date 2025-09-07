@@ -48,7 +48,7 @@
 
 /// 调试输出控制
 #ifndef DISABLE_SERIAL_DEBUG
-//#define ENABLE_SERIAL_DEBUG
+#define ENABLE_SERIAL_DEBUG
 #endif
 
 /// 启用异步发送功能（推荐开启）
@@ -84,7 +84,7 @@
 constexpr size_t SINGLE_CYCLE_FRAME_COUNT = 24;
 
 /// 立即发送阈值（四分之一周期帧数量）
-constexpr size_t IMMEDIATE_SEND_THRESHOLD = 1;
+constexpr size_t IMMEDIATE_SEND_THRESHOLD = 4;
 
 /// 立即发送字节数阈值（6帧 × 13字节）
 constexpr size_t IMMEDIATE_SEND_THRESHOLD_BYTES = IMMEDIATE_SEND_THRESHOLD * CAN_FRAME_SIZE;
@@ -162,6 +162,7 @@ private:
 #ifdef ENABLE_ASYNC_SEND
     CircularBuffer asyncFrameBuffer_;               ///< 异步发送帧缓冲区（二进制数据存储）
     std::atomic<bool> asyncSending_{false};         ///< 异步发送进行中标志
+    std::atomic<bool> needsResend_{false};          ///< 需要重新发送标志
     
     // 错误和背压回调函数
     std::function<void(const std::string&, size_t)> errorCallback_;
@@ -311,11 +312,26 @@ private:
             }
 #endif
             
-            // 使用环形缓冲区的popBytes接口清除已发送的数据
-            // 由于环形缓冲区自动管理读写位置，这里只需要检查是否还有数据
-            if (asyncFrameBuffer_.getUsedSpace() > 0) {
-                startAsyncSend();
-            }
+            // 使用标志位而不是直接调用，避免重入问题
+            // 外部需要定期调用checkAndResend()来触发下一次发送
+            needsResend_ = (asyncFrameBuffer_.getUsedSpace() > 0);
+        }
+    }
+    
+    /**
+     * @brief 检查并重新发送缓冲区中的数据
+     * 
+     * @details 外部定期调用此方法来检查是否需要重新发送数据，
+     * 避免在异步回调中直接调用startAsyncSend()导致重入问题
+     */
+    void checkAndResend() {
+        std::lock_guard<std::mutex> lock(sendMutex_);
+        
+        if (needsResend_.load(std::memory_order_acquire) && 
+            !asyncSending_.load(std::memory_order_acquire) &&
+            isConnected()) {
+            needsResend_.store(false, std::memory_order_release);
+            startAsyncSend();
         }
     }
     
@@ -342,6 +358,11 @@ private:
         try {
             // 获取环形缓冲区中可用的数据大小
             size_t bytesToSend = asyncFrameBuffer_.getUsedSpace();
+
+            //保证13字节帧的完整性
+            bytesToSend = (bytesToSend / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
+
+
             if (bytesToSend == 0) {
                 return;
             }
@@ -363,6 +384,11 @@ private:
                 return;
             }
             
+            std::cout << "[DEBUG] sendBuffer addr: " << (void*)sendBuffer.data()
+                << ", size: " << sendBuffer.size() << std::endl;
+
+
+
             // 完整性验证：数据大小必须是13的倍数
             if (bytesRead % CAN_FRAME_SIZE != 0) {
 #ifdef ENABLE_SERIAL_DEBUG
@@ -433,19 +459,6 @@ private:
         }
         
         std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        // 背压检查：如果缓冲区接近满，拒绝新数据
-        size_t freeSpace = asyncFrameBuffer_.getFreeSpace();
-        if (freeSpace < CAN_FRAME_SIZE * 2) {  // 预留2帧空间
-            if (backpressureCallback_) {
-                backpressureCallback_("HighBackpressure");
-            }
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::asyncSendFrame]: 背压拒绝，空闲空间: " 
-                      << freeSpace << "字节" << std::endl;
-#endif
-            return false;  // 背压，拒绝数据
-        }
         
         // 帧完整性验证：确保每个CAN帧都是完整的13字节
         const auto& binaryData = frame.getBinaryFrame();
@@ -675,6 +688,14 @@ public:
         
         // 检查缓冲区容量 - 基于字节数
         size_t requiredSpace = actualCount * CAN_FRAME_SIZE;
+
+        std::cout << "[DEBUG] used=" << asyncFrameBuffer_.getUsedSpace()
+            << ", required=" << requiredSpace
+            << ", capacity=" << asyncFrameBuffer_.getCapacity() << std::endl;
+
+
+
+
         if (asyncFrameBuffer_.getUsedSpace() + requiredSpace > asyncFrameBuffer_.getCapacity()) {
 #ifdef ENABLE_SERIAL_DEBUG
             std::cerr << "[WARN][SerialPortManager::sendFramesBatch]: 批量帧丢弃！周期容量超限。"
@@ -937,7 +958,7 @@ public:
     }
     
     /**
-     * @brief 检查是否正在异步发送
+     * @brief 检查是否正在异步发送 
      * 
      * @return 异步发送是否正在进行中
      */

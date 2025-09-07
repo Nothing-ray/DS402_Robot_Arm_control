@@ -29,11 +29,18 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstring>
+#include <iostream>
+#include <iomanip>
 
 #include "CAN_frame.hpp"
 
 // 使用1024字节容量以获得位运算优化（2的10次方）
 constexpr size_t CIRCULAR_BUFFER_CAPACITY = 1024; // 2^10 = 1024
+
+// 环形缓冲区调试宏 - 通过编译时定义启用调试输出
+#ifndef CIRCULAR_BUFFER_DEBUG
+#define CIRCULAR_BUFFER_DEBUG 0
+#endif
 
 // CAN帧固定大小
 constexpr size_t CAN_FRAME_SIZE = 13;
@@ -93,6 +100,65 @@ private:
         if (size % CAN_FRAME_SIZE != 0) {
             throw std::invalid_argument("数据大小必须是13的倍数");
         }
+    }
+
+    /**
+     * @brief 调试输出函数 - 格式化显示读写操作信息
+     * @param operation 操作类型（"Push"或"Pop"）
+     * @param data 数据指针
+     * @param size 数据大小
+     * @param position 缓冲区位置
+     * @param usedSpace 已使用空间
+     */
+    inline void debugOutput(const char* operation, const uint8_t* data, size_t size, 
+                          uint32_t position, uint32_t usedSpace) const {
+#if CIRCULAR_BUFFER_DEBUG
+        std::cout << "[DEBUG][CircularBuffer] " << operation << " " << size 
+                  << " bytes at pos " << position << ":\n";
+        
+        // 输出缓冲区状态
+        std::cout << "Buffer: used=" << usedSpace << "/" << CIRCULAR_BUFFER_CAPACITY
+                  << ", free=" << (CIRCULAR_BUFFER_CAPACITY - usedSpace) << "\n";
+        
+        // 如果是CAN帧且大小正确，解析帧信息
+        if (size == CAN_FRAME_SIZE && size >= 13) {
+            uint8_t frameInfo = data[0];
+            uint32_t frameID = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+            
+            std::cout << "Frame Info: 0x" << std::hex << std::setw(2) << std::setfill('0') 
+                      << static_cast<int>(frameInfo) << std::dec << " (";
+            std::cout << "DLC=" << (frameInfo & 0x0F);
+            std::cout << ", FF=" << ((frameInfo >> 7) & 0x01);
+            std::cout << ", PTR=" << ((frameInfo >> 6) & 0x01);
+            std::cout << ", EDL=" << ((frameInfo >> 5) & 0x01);
+            std::cout << ", BRS=" << ((frameInfo >> 4) & 0x01) << ")\n";
+            
+            std::cout << "Frame ID: 0x" << std::hex << std::setw(8) << std::setfill('0') 
+                      << frameID << std::dec << "\n";
+            
+            std::cout << "Data: ";
+            for (size_t i = 5; i < 13; ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                          << static_cast<int>(data[i]) << " ";
+            }
+            std::cout << std::dec << "\n";
+        } else {
+            // 输出原始二进制数据
+            std::cout << "Raw Data: ";
+            for (size_t i = 0; i < std::min(size, static_cast<size_t>(16)); ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                          << static_cast<int>(data[i]) << " ";
+            }
+            /*
+            if (size > 16) {
+                std::cout << "... (" << (size - 16) << " more bytes)";
+            }
+            */
+            std::cout << std::dec << "\n";
+        }
+        
+        std::cout << "---\n";
+#endif
     }
     
 public:
@@ -185,6 +251,11 @@ public:
         // 通知等待的读取线程
         notEmpty_.notify_one();
         
+        // 调试输出
+#if CIRCULAR_BUFFER_DEBUG
+        debugOutput("Push", data, size, writer_.writePos_, control_.used_);
+#endif
+        
         return true;
     }
     
@@ -241,6 +312,11 @@ public:
         
         // 通知等待的写入线程
         notFull_.notify_one();
+        
+        // 调试输出 - 在数据拷贝后但在返回前调用
+#if CIRCULAR_BUFFER_DEBUG
+        debugOutput("Pop", buffer, bytesToRead, reader_.readPos_, control_.used_);
+#endif
         
         return bytesToRead;
     }
@@ -310,6 +386,11 @@ public:
         
         // 通知等待的写入线程
         notFull_.notify_one();
+        
+        // 调试输出 - 在数据拷贝后但在返回前调用
+#if CIRCULAR_BUFFER_DEBUG
+        debugOutput("Pop", buffer, bytesToRead, reader_.readPos_, control_.used_);
+#endif
         
         return bytesToRead;
     }
