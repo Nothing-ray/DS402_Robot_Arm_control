@@ -48,21 +48,13 @@
 
 /// 调试输出控制
 #ifndef DISABLE_SERIAL_DEBUG
-#define ENABLE_SERIAL_DEBUG
+//#define ENABLE_SERIAL_DEBUG
 #endif
 
-/// 启用异步发送功能（推荐开启）
-#ifndef DISABLE_ASYNC_SEND
-#define ENABLE_ASYNC_SEND
-#endif
 
 //每帧发送之间的休眠时间
 #define SLEEP_TIME 0
 
-/// 异步传输模式配置
-#ifndef ASYNC_TRANSFER_MODE
-#define ASYNC_TRANSFER_MODE boost::asio::transfer_all()
-#endif
 
 /// 串口缓冲区大小配置
 #ifndef SERIAL_BUFFER_SIZE
@@ -89,8 +81,6 @@ constexpr size_t IMMEDIATE_SEND_THRESHOLD = 4;
 /// 立即发送字节数阈值（6帧 × 13字节）
 constexpr size_t IMMEDIATE_SEND_THRESHOLD_BYTES = IMMEDIATE_SEND_THRESHOLD * CAN_FRAME_SIZE;
 
-/// 异步发送缓冲区最大帧数量（严格单周期限制）
-constexpr size_t ASYNC_BUFFER_MAX_FRAMES = SINGLE_CYCLE_FRAME_COUNT;
 
 // 使用CircularBuffer.hpp中定义的CAN_FRAME_SIZE
 // constexpr size_t CAN_FRAME_SIZE = 13;
@@ -108,21 +98,18 @@ constexpr size_t MAX_BATCH_FRAMES = 24;
  * ## 主要特性
  * - **中心化实例管理**: 避免资源重复创建，确保全局唯一串口实例
  * - **线程安全隔离**: 独立的发送、接收、连接互斥锁，确保操作互不干扰
- * - **高性能异步发送**: 支持异步缓冲发送，减少线程阻塞时间
- * - **批量处理优化**: 支持批量帧发送，最大化总线利用率
- * - **周期对齐缓冲**: 严格单周期容量限制，确保实时性
+ * - **高性能同步发送**: 支持同步批量发送，最大化总线利用率
+ * - **批量处理优化**: 支持批量帧发送，减少系统调用开销
  * - **自动错误恢复**: 连接异常自动检测和重连机制
  * 
  * ## 性能优化特性
  * - **帧完整性保护**: 严格按完整帧管理，确保13字节帧边界不被破坏
- * - **周期对齐缓冲区**: 严格单周期限制(24帧)，半周期(12帧)立即触发发送
  * - **批量帧处理**: 最多支持24帧批量发送(6电机×4PDO)，减少系统调用开销
  * - **零拷贝优化**: 直接操作内存缓冲区，避免不必要的数据复制
  * - **缓存行对齐**: 关键数据结构64字节对齐，避免伪共享
  * 
  * ## 编译时配置
  * 通过定义以下宏启用特定功能：
- * - `ENABLE_ASYNC_SEND`: 启用异步发送功能（推荐）
  * - `ENABLE_SERIAL_DEBUG`: 启用调试输出
  * 
  * @note 所有串口操作都通过本模块进行，确保线程安全和资源一致性
@@ -158,22 +145,10 @@ private:
     unsigned int baudRate_;                          ///< 波特率
     std::atomic<bool> connected_{false};             ///< 连接状态标志
     
-    // 异步发送相关成员
-#ifdef ENABLE_ASYNC_SEND
-    CircularBuffer asyncFrameBuffer_;               ///< 异步发送帧缓冲区（二进制数据存储）
-    std::atomic<bool> asyncSending_{false};         ///< 异步发送进行中标志
-    std::atomic<bool> needsResend_{false};          ///< 需要重新发送标志
+    // 预分配发送缓冲区（64字节对齐，1024字节大小）
+    alignas(64) std::array<uint8_t, 1024> sendBuffer_;
+    std::mutex bufferMutex_;                         ///< 缓冲区操作互斥锁
     
-    // 错误和背压回调函数
-    std::function<void(const std::string&, size_t)> errorCallback_;
-    std::function<void(const std::string&)> backpressureCallback_;
-    
-    // 性能统计
-    std::atomic<uint64_t> totalFramesSent_{0};
-    std::atomic<uint64_t> totalBytesSent_{0};
-    std::atomic<uint64_t> totalSendErrors_{0};
-    std::chrono::steady_clock::time_point lastStatResetTime_;
-#endif
     
     /**
      * @brief 内部连接方法
@@ -230,296 +205,22 @@ private:
         }
     }
     
-#ifdef ENABLE_ASYNC_SEND
-    /**
-     * @brief 处理发送错误
-     * @param error 错误信息
-     * @param lostBytes 丢失的字节数
-     */
-    void handleSendError(const boost::system::error_code& error, size_t lostBytes) {
-        connected_.store(false, std::memory_order_release);
-        
-        // 更新错误统计
-        totalSendErrors_.fetch_add(1, std::memory_order_relaxed);
-        
-        // 分类处理不同错误
-        std::string errorType;
-        if (error == boost::asio::error::operation_aborted) {
-            errorType = "OperationAborted";
-        } else if (error == boost::asio::error::broken_pipe) {
-            errorType = "ConnectionBroken";
-        } else if (error == boost::asio::error::timed_out) {
-            errorType = "Timeout";
-        } else {
-            errorType = "OtherError";
-        }
-        
-        // 通知上层应用
-        if (errorCallback_) {
-            errorCallback_(errorType, lostBytes);
-        }
-        
-#ifdef ENABLE_SERIAL_DEBUG
-        std::cerr << "[ERROR][SerialPortManager::handleSendError]: " 
-                  << errorType << " - " << error.message() 
-                  << ", lost " << lostBytes << " bytes" << std::endl;
-#endif
-    }
-    
-    /**
-     * @brief 异步发送完成处理回调
-     * @param error 发送错误信息
-     * @param bytesTransferred 实际传输字节数
-     * @param bytesRequested 请求发送的字节数
-     */
-    void handleAsyncSendComplete(const boost::system::error_code& error, size_t bytesTransferred, size_t bytesRequested) {
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        // 首先在锁保护下修改所有共享状态
-        asyncSending_.store(false, std::memory_order_release);
-        
-        if (error) {
-            // 记录丢失的数据量
-            size_t lostBytes = asyncFrameBuffer_.getUsedSpace();
-            
-            // 清空缓冲区但先记录数据量
-            asyncFrameBuffer_.clear();
-            
-            // 使用统一的错误处理方法
-            handleSendError(error, lostBytes);
-            return;
-        } else {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[DEBUG][SerialPortManager::handleAsyncSendComplete]: "
-                      << "异步发送完成，请求字节数: " << bytesRequested
-                      << "，实际传输字节数: " << bytesTransferred << std::endl;
-            
-            // 检查传输完整性 - 使用transfer_all后应该总是相等
-            if (bytesTransferred == bytesRequested) {
-                std::cout << "[DEBUG][SerialPortManager::handleAsyncSendComplete]: "
-                          << "transfer_all确保所有数据完整传输" << std::endl;
-            } else {
-                std::cerr << "[ERROR][SerialPortManager::handleAsyncSendComplete]: "
-                          << "transfer_all传输失败！请求 " << bytesRequested 
-                          << " 字节，实际传输 " << bytesTransferred << " 字节" << std::endl;
-            }
-            
-            // 检查传输字节数是否为13的倍数
-            if (bytesTransferred % CAN_FRAME_SIZE != 0) {
-                std::cerr << "[ERROR][SerialPortManager::handleAsyncSendComplete]: "
-                          << "帧完整性错误！传输字节数 (" << bytesTransferred 
-                          << ") 不是13的倍数" << std::endl;
-            }
-#endif
-            
-            // 使用标志位而不是直接调用，避免重入问题
-            // 外部需要定期调用checkAndResend()来触发下一次发送
-            needsResend_ = (asyncFrameBuffer_.getUsedSpace() > 0);
-        }
-    }
-    
-    /**
-     * @brief 检查并重新发送缓冲区中的数据
-     * 
-     * @details 外部定期调用此方法来检查是否需要重新发送数据，
-     * 避免在异步回调中直接调用startAsyncSend()导致重入问题
-     */
-    void checkAndResend() {
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        if (needsResend_.load(std::memory_order_acquire) && 
-            !asyncSending_.load(std::memory_order_acquire) &&
-            isConnected()) {
-            needsResend_.store(false, std::memory_order_release);
-            startAsyncSend();
-        }
-    }
-    
-    /**
-     * @brief 启动异步发送操作
-     * 
-     * @details 该方法确保只发送完整的13字节CAN帧，维护严格的帧边界完整性。
-     * 通过将帧缓冲区中的所有完整帧合并为连续字节流发送，确保不会出现
-     * 跨帧边界的传输，从而保证每个CAN帧的完整性。
-     * 
-     * @note 帧完整性保证：
-     * - 每个CAN帧严格保持13字节长度
-     * - 发送操作以完整帧为单位进行
-     * - 接收端回调会验证传输字节数是否为13的整数倍
-     * - 任何帧边界错误都会触发连接断开和数据清空
-     */
-    void startAsyncSend() {
-        if (asyncFrameBuffer_.isEmpty() || !isConnected()) {
-            return;
-        }
-        
-        asyncSending_.store(true, std::memory_order_release);
-        
-        try {
-            // 获取环形缓冲区中可用的数据大小
-            size_t bytesToSend = asyncFrameBuffer_.getUsedSpace();
-
-            //保证13字节帧的完整性
-            bytesToSend = (bytesToSend / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
-
-
-            if (bytesToSend == 0) {
-                return;
-            }
-            
-            // 调试输出：显示缓冲区状态
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[DEBUG][SerialPortManager::startAsyncSend]: "
-                      << "缓冲区使用空间: " << bytesToSend << " 字节, "
-                      << "完整帧数: " << (bytesToSend / CAN_FRAME_SIZE) << " 帧" << std::endl;
-#endif
-            
-            // 使用线程局部存储预分配缓冲区，避免锁内内存分配
-            thread_local std::vector<uint8_t> sendBuffer;
-            sendBuffer.resize(bytesToSend);
-            
-            size_t bytesRead = asyncFrameBuffer_.popBytes(sendBuffer.data(), bytesToSend);
-            
-            if (bytesRead == 0) {
-                return;
-            }
-            
-            std::cout << "[DEBUG] sendBuffer addr: " << (void*)sendBuffer.data()
-                << ", size: " << sendBuffer.size() << std::endl;
-
-
-
-            // 完整性验证：数据大小必须是13的倍数
-            if (bytesRead % CAN_FRAME_SIZE != 0) {
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cerr << "[ERROR][SerialPortManager::startAsyncSend]: "
-                          << "帧完整性错误！读取字节数: " << bytesRead
-                          << " (不是13的倍数)" << std::endl;
-                
-                // 输出缓冲区内容用于调试
-                std::cerr << "[DEBUG][SerialPortManager::startAsyncSend]: "
-                          << "异常缓冲区内容: ";
-                for (size_t i = 0; i < bytesRead; ++i) {
-                    std::cerr << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(sendBuffer[i]) << " ";
-                    if ((i + 1) % CAN_FRAME_SIZE == 0) {
-                        std::cerr << " | "; // 每13字节分隔
-                    }
-                }
-                std::cerr << std::dec << std::endl;
-#endif
-                throw std::runtime_error("内部错误：发送数据总长度不是13字节的整数倍");
-            }
-            
-            // 调试输出：显示将要发送的数据
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[DEBUG][SerialPortManager::startAsyncSend]: "
-                      << "准备发送 " << bytesRead << " 字节 ("
-                      << (bytesRead / CAN_FRAME_SIZE) << " 帧)，使用transfer_all确保完整传输" << std::endl;
-            
-            // 显示每帧的详细信息
-            for (size_t frameStart = 0; frameStart < bytesRead; frameStart += CAN_FRAME_SIZE) {
-                std::cout << "[DEBUG][SerialPortManager::startAsyncSend]: "
-                          << "帧 " << (frameStart / CAN_FRAME_SIZE) << ": ";
-                for (size_t i = 0; i < CAN_FRAME_SIZE; ++i) {
-                    std::cout << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(sendBuffer[frameStart + i]) << " ";
-                }
-                std::cout << std::dec << std::endl;
-            }
-#endif
-            
-            boost::asio::async_write(
-                *serialPort_,
-                boost::asio::buffer(sendBuffer.data(), bytesRead),
-                ASYNC_TRANSFER_MODE, // 使用配置的传输模式
-                [this, bytesRead](const boost::system::error_code& error, size_t bytesTransferred) {
-                    handleAsyncSendComplete(error, bytesTransferred, bytesRead);
-                }
-            );
-        }
-        catch (const std::exception& e) {
-            asyncSending_.store(false, std::memory_order_release);
-            connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::startAsyncSend]: " << e.what() << std::endl;
-#endif
-        }
-    }
-    
-    /**
-     * @brief 异步发送数据到缓冲区
-     * @param data 待发送数据
-     * @param size 数据大小
-     * @return 是否成功加入缓冲区
-     */
-    bool asyncSendFrame(const CanFrame& frame) {
-        if (!isConnected()) {
-            return false;
-        }
-        
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        // 帧完整性验证：确保每个CAN帧都是完整的13字节
-        const auto& binaryData = frame.getBinaryFrame();
-        if (binaryData.size() != CAN_FRAME_SIZE) {
-            throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
-                                   std::to_string(binaryData.size()) + "字节");
-        }
-        
-        // 严格周期容量检查 - 不允许超过单周期帧数量
-        if (asyncFrameBuffer_.getUsedSpace() + CAN_FRAME_SIZE > asyncFrameBuffer_.getCapacity()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::asyncSendFrame]: 周期帧容量超限，丢弃帧" << std::endl;
-#endif
-            return false;
-        }
-        
-        // 添加完整帧到缓冲区
-        if (!asyncFrameBuffer_.pushFrame(frame)) {
-            return false;
-        }
-        
-        // 更新性能统计
-        totalFramesSent_.fetch_add(1, std::memory_order_relaxed);
-        totalBytesSent_.fetch_add(CAN_FRAME_SIZE, std::memory_order_relaxed);
-        
-        // 达到半周期字节数或当前没有发送操作，立即启动发送
-        if (asyncFrameBuffer_.getUsedSpace() >= IMMEDIATE_SEND_THRESHOLD_BYTES || !asyncSending_.load(std::memory_order_acquire)) {
-            startAsyncSend();
-        }
-        
-        return true;
-    }
-#endif // ENABLE_ASYNC_SEND
     
 public:
     /**
      * @brief 默认构造函数
      */
     SerialPortManager() {
-#ifdef ENABLE_ASYNC_SEND
-        lastStatResetTime_ = std::chrono::steady_clock::now();
-#endif
+        // 初始化预分配缓冲区
+        sendBuffer_.fill(0);
     }
     
     /**
      * @brief 析构函数
      * 
-     * @details 安全地关闭串口连接并清理所有资源。在异步发送进行中时会
-     * 等待当前发送操作完成，确保资源正确释放。
+     * @details 安全地关闭串口连接并清理所有资源。
      */
     ~SerialPortManager() {
-        // 等待异步发送完成
-#ifdef ENABLE_ASYNC_SEND
-        constexpr int maxWaitMs = 100;
-        int waited = 0;
-        while (asyncSending_.load(std::memory_order_acquire) && waited < maxWaitMs) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            ++waited;
-        }
-#endif
-        
         disconnect();
     }
     
@@ -547,11 +248,6 @@ public:
         portName_ = portName;
         baudRate_ = baudRate;
         
-        // 初始化异步发送缓冲区
-#ifdef ENABLE_ASYNC_SEND
-        asyncFrameBuffer_.clear();
-        asyncSending_.store(false, std::memory_order_release);
-#endif
         
         return connectInternal();
     }
@@ -577,10 +273,10 @@ public:
      * @param frame 待发送的CAN帧
      * @return 发送是否成功
      * 
-     * @details 发送单个CAN帧到串口设备。根据编译配置，可能使用同步或异步发送方式。
-     * 同步发送会阻塞当前线程直到数据完全写入，异步发送则将数据加入缓冲区后立即返回。
+     * @details 发送单个CAN帧到串口设备。使用同步发送方式。
+     * 阻塞当前线程直到数据完全写入。
      * 
-     * @note 在ENABLE_ASYNC_SEND启用时，该方法变为非阻塞操作，实际发送在后台进行。
+     * @note 该方法使用同步发送方式，确保数据立即发送到串口。
      */
     bool sendFrame(const CanFrame& frame) {
         if (!isConnected()) {
@@ -592,34 +288,8 @@ public:
         
         const std::vector<uint8_t>& binaryData = frame.getBinaryFrame();
         
-#ifdef ENABLE_ASYNC_SEND
-        // 异步发送模式 - 严格的周期容量检查（基于字节数）
-        if (asyncFrameBuffer_.getUsedSpace() + CAN_FRAME_SIZE > asyncFrameBuffer_.getCapacity()) {
-            // 严重错误：周期容量超限，立即丢弃帧
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendFrame]: " 
-                      << "帧丢弃！周期容量超限。当前缓冲区: " 
-                      << asyncFrameBuffer_.getUsedSpace() << "字节，周期限制: " 
-                      << asyncFrameBuffer_.getCapacity() << "字节" << std::endl;
-#endif
-            throw std::runtime_error("串口周期容量超限 - 数据帧丢弃，实时性受威胁");
-        }
-        
-        bool success = asyncSendFrame(frame);
-        if (success) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[DEBUG][SerialPortManager]: CAN帧加入异步发送队列. 字节: ";
-            for (uint8_t byte : binaryData) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                          << static_cast<int>(byte) << " ";
-            }
-            std::cout << std::dec << std::endl;
-#endif
-        }
-        return success;
-#else
         // 同步发送模式
-        std::lock_guard<std::mutex> lock(sendMutex_);
+        
         
         try {
             // 帧完整性验证：每个帧必须是13字节
@@ -627,18 +297,29 @@ public:
                 throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
                                        std::to_string(binaryData.size()) + "字节");
             }
-            
+#ifdef ENABLE_SERIAL_DEBUG
             // 开始计时（纳秒精度）
             auto startTime = std::chrono::high_resolution_clock::now();
             
-            boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
-            
+#endif
+
+            {
+
+                std::lock_guard<std::mutex> lock(sendMutex_);
+
+                //发送数据
+                boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
+
+
+            }
+
+#ifdef ENABLE_SERIAL_DEBUG
             // 结束计时并计算耗时（纳秒转换为微秒）
             auto endTime = std::chrono::high_resolution_clock::now();
             auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
             double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
             
-#ifdef ENABLE_SERIAL_DEBUG
+
             std::cout << "[DEBUG][SerialPortManager]: CAN帧发送成功. 字节: ";
             for (uint8_t byte : binaryData) {
                 std::cout << std::hex << std::setw(2) << std::setfill('0') 
@@ -660,7 +341,6 @@ public:
 #endif
             return false;
         }
-#endif // ENABLE_ASYNC_SEND
     }
     
     /**
@@ -682,50 +362,6 @@ public:
         // 限制批量大小
         size_t actualCount = std::min(frames.size(), MAX_BATCH_FRAMES);
         
-#ifdef ENABLE_ASYNC_SEND
-        // 异步批量发送（基于帧数量）
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        // 检查缓冲区容量 - 基于字节数
-        size_t requiredSpace = actualCount * CAN_FRAME_SIZE;
-
-        std::cout << "[DEBUG] used=" << asyncFrameBuffer_.getUsedSpace()
-            << ", required=" << requiredSpace
-            << ", capacity=" << asyncFrameBuffer_.getCapacity() << std::endl;
-
-
-
-
-        if (asyncFrameBuffer_.getUsedSpace() + requiredSpace > asyncFrameBuffer_.getCapacity()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::sendFramesBatch]: 批量帧丢弃！周期容量超限。"
-                      << "当前缓冲区: " << asyncFrameBuffer_.getUsedSpace() << "字节，"
-                      << "批量帧数: " << actualCount << "帧，"
-                      << "周期限制: " << asyncFrameBuffer_.getCapacity() << "字节" << std::endl;
-#endif
-            return 0;
-        }
-        
-        // 帧完整性验证：确保所有CAN帧都是完整的13字节
-        for (size_t i = 0; i < actualCount; ++i) {
-            const auto& binaryData = frames[i].getBinaryFrame();
-            if (binaryData.size() != CAN_FRAME_SIZE) {
-                throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
-                                       std::to_string(binaryData.size()) + "字节");
-            }
-        }
-        
-        // 批量添加所有帧到缓冲区
-        size_t successCount = asyncFrameBuffer_.pushFrames(frames);
-        
-        // 触发发送（达到半周期字节数或当前没有发送操作）
-        if (asyncFrameBuffer_.getUsedSpace() >= IMMEDIATE_SEND_THRESHOLD_BYTES || !asyncSending_.load(std::memory_order_acquire)) {
-            startAsyncSend();
-        }
-        
-        return successCount;
-        
-#else
         // 同步批量发送
         std::lock_guard<std::mutex> lock(sendMutex_);
         
@@ -781,7 +417,6 @@ public:
 #endif
             return 0;
         }
-#endif // ENABLE_ASYNC_SEND
     }
     
     /**
@@ -867,108 +502,236 @@ public:
         return portName_ + " @ " + std::to_string(baudRate_) + " baud";
     }
     
+    
     /**
-     * @brief 刷新异步发送缓冲区
+     * @brief 同步批量发送环形缓冲区数据
      * 
-     * @details 强制立即发送异步缓冲区中的所有数据，无论当前缓冲区大小如何。
-     * 主要用于需要确保数据立即发送的场景，如关键指令或紧急停止。
+     * @details 从环形缓冲区发送数据，以13字节为单位进行同步发送。
+     * 该方法提供高性能的同步批量发送功能，适用于需要精确控制发送时机的场景。
+     * 使用线程局部存储避免锁内内存分配，优化性能。
      * 
-     * @return 是否成功启动发送
+     * @param buffer 环形缓冲区引用，包含待发送的CAN帧数据
+     * @param sendsize 指定发送字节数，-1表示发送所有可用完整帧
+     * @param clearAfterSend 发送后是否清空缓冲区（默认false）
+     * @return 成功发送的字节数（13的倍数）
+     * 
+     * @note 该方法确保只发送完整的CAN帧，维护严格的帧边界完整性。
+     * @warning 如果指定sendsize不是13的倍数，会自动向下取整到最近的13字节倍数
+     * @warning sendsize <= 0（除-1外）时不会发送任何数据
      */
-    bool flushAsyncBuffer() {
-#ifdef ENABLE_ASYNC_SEND
-        if (!isConnected() || asyncFrameBuffer_.isEmpty()) {
-            return false;
+    inline size_t sendBufferSync(CircularBuffer& buffer, int sendsize = -1, bool clearAfterSend = false) {
+        if (!isConnected() || buffer.isEmpty()) {
+            return 0;
         }
         
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        if (!asyncSending_.load(std::memory_order_acquire)) {
-            startAsyncSend();
-            return true;
+        // 第一阶段：无锁计算发送大小
+        size_t sendSize;
+        if (sendsize == -1) {
+            // sendsize为-1时，发送所有可用完整帧，但不超过缓冲区大小
+            sendSize = std::min(buffer.getAvailableFrames() * CAN_FRAME_SIZE, sendBuffer_.size());
+        } else if (sendsize > 0) {
+            // sendsize大于0时，按指定字节数发送，但确保是13的倍数且不超过缓冲区
+            sendSize = std::min(static_cast<size_t>((sendsize / CAN_FRAME_SIZE) * CAN_FRAME_SIZE), 
+                               sendBuffer_.size());
+            // 限制发送大小不超过缓冲区可用空间
+            sendSize = std::min(sendSize, static_cast<size_t>(buffer.getUsedSpace()));
+        } else {
+            // sendsize <= 0（除-1外）时，不发送任何数据
+            return 0;
         }
+
+        if (sendSize == 0) return 0;
+        
+        // 第二阶段：最小化锁范围 - 仅保护缓冲区填充操作
+        size_t bytesRead;
+        {
+            std::lock_guard<std::mutex> lock(bufferMutex_);
+            bytesRead = buffer.popBytes(sendBuffer_.data(), sendSize);
+        }
+        
+        if (bytesRead == 0) {
+            return 0;
+        }
+        
+        // 确保只发送完整帧（13字节倍数）
+        size_t bytesToSend = (bytesRead / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
+        if (bytesToSend == 0) {
+            return 0;
+        }
+        
+        try {
+            // 帧完整性验证：确保发送的数据是13的倍数
+            if (bytesToSend % CAN_FRAME_SIZE != 0) {
+                throw std::runtime_error("内部错误：发送数据总长度不是13字节的整数倍");
+            }
+
+#ifdef ENABLE_SERIAL_DEBUG
+
+
+            // 开始计时（纳秒精度）
+            auto startTime = std::chrono::high_resolution_clock::now();
 #endif
-        return false;
+
+
+            {
+                std::lock_guard<std::mutex> lock(sendMutex_);
+                // 同步发送所有数据
+                boost::asio::write(*serialPort_, boost::asio::buffer(sendBuffer_.data(), bytesToSend));
+            }
+#ifdef ENABLE_SERIAL_DEBUG
+            // 结束计时并计算耗时（纳秒转换为微秒）
+            auto endTime = std::chrono::high_resolution_clock::now();
+            auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+            double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
+            
+
+            std::cout << "[DEBUG][SerialPortManager::sendBufferSync]: "
+                      << "同步批量发送完成，请求字节数: " << sendsize
+                      << "，实际发送字节数: " << bytesToSend
+                      << "，帧数: " << (bytesToSend / CAN_FRAME_SIZE)
+                      << "，耗时: " << std::fixed << std::setprecision(2) 
+                      << elapsedTimeUs << " us" << std::endl;
+            
+            // 显示每帧的详细信息
+            for (size_t frameStart = 0; frameStart < bytesToSend; frameStart += CAN_FRAME_SIZE) {
+                std::cout << "[DEBUG][SerialPortManager::sendBufferSync]: "
+                          << "帧 " << (frameStart / CAN_FRAME_SIZE) << ": ";
+                for (size_t i = 0; i < CAN_FRAME_SIZE; ++i) {
+                    std::cout << std::hex << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(sendBuffer_[frameStart + i]) << " ";
+                }
+                std::cout << std::dec << std::endl;
+            }
+#endif
+            
+            // 如果需要清空缓冲区
+            if (clearAfterSend) {
+                buffer.clear();
+            }
+            
+            return bytesToSend;
+        }
+        catch (const std::exception& e) {
+            connected_.store(false, std::memory_order_release);
+#ifdef ENABLE_SERIAL_DEBUG
+            std::cerr << "[ERROR][SerialPortManager::sendBufferSync]: " << e.what() << std::endl;
+#endif
+            return 0;
+        }
     }
     
     /**
-     * @brief 设置错误回调函数
+     * @brief 自动同步循环发送环形缓冲区数据
      * 
-     * @param callback 回调函数，参数为错误类型和丢失的字节数
-     */
-    void setErrorCallback(std::function<void(const std::string&, size_t)> callback) {
-#ifdef ENABLE_ASYNC_SEND
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        errorCallback_ = std::move(callback);
-#endif
-    }
-    
-    /**
-     * @brief 设置背压回调函数
+     * @details 自动清空环形缓冲区中的所有完整CAN帧数据，采用两阶段策略：
+     * 1. 一次性从环形缓冲区读取所有数据到发送缓冲区
+     * 2. 循环方式每次发送13字节（1帧），直到发送缓冲区清空
+     * 该方法专为"一键清空"场景设计，确保严格的帧边界完整性。
      * 
-     * @param callback 回调函数，参数为背压级别描述
-     */
-    void setBackpressureCallback(std::function<void(const std::string&)> callback) {
-#ifdef ENABLE_ASYNC_SEND
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        backpressureCallback_ = std::move(callback);
-#endif
-    }
-    
-    /**
-     * @brief 获取性能统计信息
+     * @param buffer 环形缓冲区引用，包含待发送的CAN帧数据
+     * @param clearAfterSend 发送后是否清空缓冲区（默认true）
+     * @return 成功发送的字节数（13的倍数）
      * 
-     * @return 包含帧数、字节数、错误数的元组
+     * @note 该方法采用两阶段策略，减少环形缓冲区锁定时间，提高并发性能。
+     * @warning 只发送完整的CAN帧，确保严格的帧边界完整性。
      */
-    std::tuple<uint64_t, uint64_t, uint64_t> getPerformanceStats() const {
-#ifdef ENABLE_ASYNC_SEND
-        return {
-            totalFramesSent_.load(std::memory_order_relaxed),
-            totalBytesSent_.load(std::memory_order_relaxed),
-            totalSendErrors_.load(std::memory_order_relaxed)
-        };
-#else
-        return {0, 0, 0};
+    inline size_t sendBufferSyncAuto(CircularBuffer& buffer, bool clearAfterSend = true) {
+        if (!isConnected() || buffer.isEmpty()) {
+            return 0;
+        }
+        
+        // 第一阶段：一次性读取所有数据到发送缓冲区
+        size_t totalBytesRead;
+        {
+            std::lock_guard<std::mutex> lock(bufferMutex_);
+            totalBytesRead = buffer.popBytes(sendBuffer_.data(), sendBuffer_.size());
+        }
+        
+        if (totalBytesRead == 0) {
+            return 0;
+        }
+        
+        // 确保只处理完整帧（13字节倍数）
+        size_t totalBytesToSend = (totalBytesRead / CAN_FRAME_SIZE) * CAN_FRAME_SIZE;
+        if (totalBytesToSend == 0) {
+            return 0;
+        }
+        
+        size_t totalBytesSent = 0;
+        
+        try {
+#ifdef ENABLE_SERIAL_DEBUG
+            // 开始计时（纳秒精度）
+            auto startTime = std::chrono::high_resolution_clock::now();
+            std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+                      << "开始循环发送，总字节数: " << totalBytesToSend
+                      << "，总帧数: " << (totalBytesToSend / CAN_FRAME_SIZE) << std::endl;
 #endif
+
+            // 第二阶段：循环发送每一帧
+            for (size_t offset = 0; offset < totalBytesToSend; offset += CAN_FRAME_SIZE) {
+                // 帧完整性验证
+                if (offset + CAN_FRAME_SIZE > totalBytesToSend) {
+                    break; // 确保不越界
+                }
+                
+                // 发送单帧数据
+                {
+                    std::lock_guard<std::mutex> lock(sendMutex_);
+                    boost::asio::write(*serialPort_, 
+                        boost::asio::buffer(sendBuffer_.data() + offset, CAN_FRAME_SIZE));
+                }
+                
+                totalBytesSent += CAN_FRAME_SIZE;
+                
+#ifdef ENABLE_SERIAL_DEBUG
+                std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+                          << "帧 " << (offset / CAN_FRAME_SIZE) << ": ";
+                for (size_t i = 0; i < CAN_FRAME_SIZE; ++i) {
+                    std::cout << std::hex << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(sendBuffer_[offset + i]) << " ";
+                }
+                std::cout << std::dec << std::endl;
+#endif
+            }
+
+#ifdef ENABLE_SERIAL_DEBUG
+            // 结束计时并计算耗时（纳秒转换为微秒）
+            auto endTime = std::chrono::high_resolution_clock::now();
+            auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+            double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
+            
+            std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+                      << "循环发送完成，总发送字节数: " << totalBytesSent
+                      << "，总帧数: " << (totalBytesSent / CAN_FRAME_SIZE)
+                      << "，总耗时: " << std::fixed << std::setprecision(2) 
+                      << elapsedTimeUs << " us" << std::endl;
+            
+            if (totalBytesSent > 0) {
+                double avgTimePerFrame = elapsedTimeUs / (totalBytesSent / CAN_FRAME_SIZE);
+                std::cout << "[PERF][SerialPortManager::sendBufferSyncAuto]: "
+                          << "平均每帧耗时: " << std::fixed << std::setprecision(2) 
+                          << avgTimePerFrame << " us/帧" << std::endl;
+            }
+#endif
+            
+            // 如果需要清空缓冲区（确保完全清空）
+            if (clearAfterSend) {
+                buffer.clear();
+            }
+            
+            return totalBytesSent;
+        }
+        catch (const std::exception& e) {
+            connected_.store(false, std::memory_order_release);
+#ifdef ENABLE_SERIAL_DEBUG
+            std::cerr << "[ERROR][SerialPortManager::sendBufferSyncAuto]: " << e.what() << std::endl;
+#endif
+            return totalBytesSent; // 返回已成功发送的字节数
+        }
     }
     
-    /**
-     * @brief 重置性能统计
-     */
-    void resetPerformanceStats() {
-#ifdef ENABLE_ASYNC_SEND
-        totalFramesSent_.store(0, std::memory_order_relaxed);
-        totalBytesSent_.store(0, std::memory_order_relaxed);
-        totalSendErrors_.store(0, std::memory_order_relaxed);
-        lastStatResetTime_ = std::chrono::steady_clock::now();
-#endif
-    }
     
-    /**
-     * @brief 获取当前异步缓冲区状态
-     * 
-     * @return 缓冲区当前大小（字节数）
-     */
-    size_t getBufferSize() const {
-#ifdef ENABLE_ASYNC_SEND
-        return asyncFrameBuffer_.getUsedSpace();
-#else
-        return 0;
-#endif
-    }
-    
-    /**
-     * @brief 检查是否正在异步发送 
-     * 
-     * @return 异步发送是否正在进行中
-     */
-    bool isAsyncSending() const {
-#ifdef ENABLE_ASYNC_SEND
-        return asyncSending_.load(std::memory_order_acquire);
-#else
-        return false;
-#endif
-    }
 };
 
 #endif // SERIAL_MODULE_HPP

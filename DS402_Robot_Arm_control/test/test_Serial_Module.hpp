@@ -100,10 +100,11 @@ inline void testSerialBasicSend(const std::string& portName = "COM1") {
 }
 
 /**
- * @brief 批量串口发送测试函数
+ * @brief sendBufferSync方法测试函数
  * 
- * @details 自动生成6个电机的所有PDO帧，按照电机1-6的顺序批量发送，
- *          最后发送同步帧作为结束标志
+ * @details 测试SerialPortManager的sendBufferSync方法，使用环形缓冲区进行批量发送。
+ *          自动生成6个电机的所有PDO帧，填充到环形缓冲区，然后使用sendBufferSync
+ *          方法进行同步批量发送。
  * 
  * @param portName 串口设备名称，默认"COM1"
  */
@@ -118,8 +119,11 @@ inline void testSerialBatchSend(const std::string& portName = "COM1") {
     
     std::cout << "[INFO][testSerialBatchSend]: 串口连接成功" << std::endl;
     
-    // 生成所有电机的PDO测试帧
-    std::vector<CanFrame> testFrames;
+    // 创建环形缓冲区
+    CircularBuffer buffer;
+    
+    // 生成所有电机的PDO测试帧并填充到缓冲区
+    size_t totalFrames = 0;
     
     // 为6个电机生成PDO帧
     for (uint8_t motorID = 1; motorID <= 6; ++motorID) {
@@ -130,84 +134,102 @@ inline void testSerialBatchSend(const std::string& portName = "COM1") {
         uint16_t controlWord = 0x0006; // 标准控制字
         uint16_t statusWord = 0x0237;  // 标准状态字
         
-        // 电机1的PDO帧
-        // RPDO1: 目标位置 + 控制字
-        testFrames.push_back(createCanFrame(0x200 + motorID, {
+        // 创建CAN帧并添加到缓冲区
+        CanFrame rpdo1 = createCanFrame(0x200 + motorID, {
             static_cast<uint8_t>((positionValue >> 24) & 0xFF),
             static_cast<uint8_t>((positionValue >> 16) & 0xFF),
             static_cast<uint8_t>((positionValue >> 8) & 0xFF),
             static_cast<uint8_t>(positionValue & 0xFF),
             static_cast<uint8_t>((controlWord >> 8) & 0xFF),
             static_cast<uint8_t>(controlWord & 0xFF)
-        }, 6));
+        }, 6);
         
-        // RPDO2: 目标速度 + 目标电流
-        testFrames.push_back(createCanFrame(0x300 + motorID, {
+        CanFrame rpdo2 = createCanFrame(0x300 + motorID, {
             static_cast<uint8_t>((velocityValue >> 8) & 0xFF),
             static_cast<uint8_t>(velocityValue & 0xFF),
             static_cast<uint8_t>((currentValue >> 8) & 0xFF),
             static_cast<uint8_t>(currentValue & 0xFF)
-        }, 4));
+        }, 4);
         
-        // TPDO1: 实际位置 + 状态字
-        testFrames.push_back(createCanFrame(0x180 + motorID, {
+        CanFrame tpdo1 = createCanFrame(0x180 + motorID, {
             static_cast<uint8_t>((positionValue >> 24) & 0xFF),
             static_cast<uint8_t>((positionValue >> 16) & 0xFF),
             static_cast<uint8_t>((positionValue >> 8) & 0xFF),
             static_cast<uint8_t>(positionValue & 0xFF),
             static_cast<uint8_t>((statusWord >> 8) & 0xFF),
             static_cast<uint8_t>(statusWord & 0xFF)
-        }, 6));
+        }, 6);
         
-        // TPDO2: 实际速度 + 实际电流
-        testFrames.push_back(createCanFrame(0x280 + motorID, {
+        CanFrame tpdo2 = createCanFrame(0x280 + motorID, {
             static_cast<uint8_t>((velocityValue >> 8) & 0xFF),
             static_cast<uint8_t>(velocityValue & 0xFF),
             static_cast<uint8_t>((currentValue >> 8) & 0xFF),
             static_cast<uint8_t>(currentValue & 0xFF)
-        }, 4));
+        }, 4);
+        
+        // 添加到缓冲区
+        if (buffer.pushFrame(rpdo1)) totalFrames++;
+        if (buffer.pushFrame(rpdo2)) totalFrames++;
+        if (buffer.pushFrame(tpdo1)) totalFrames++;
+        if (buffer.pushFrame(tpdo2)) totalFrames++;
     }
     
     // 添加同步帧作为结束标志
-    testFrames.push_back(createCanFrame(0x080, {0x00}, 1));
+    CanFrame syncFrame = createCanFrame(0x080, {0x00}, 1);
+    if (buffer.pushFrame(syncFrame)) totalFrames++;
     
-    std::cout << "生成了 " << testFrames.size() << " 个测试帧" << std::endl;
-    std::cout << "开始批量发送所有帧..." << std::endl;
-    
-    // 批量发送所有帧
-    size_t successCount = 0;
-    size_t failCount = 0;
+    std::cout << "缓冲区填充完成 - 总帧数: " << totalFrames << " 帧" << std::endl;
+    std::cout << "缓冲区使用空间: " << buffer.getUsedSpace() << " 字节" << std::endl;
+    std::cout << "可用完整帧数: " << buffer.getAvailableFrames() << " 帧" << std::endl;
+    std::cout << "开始使用sendBufferSync进行批量发送..." << std::endl;
     
     // 开始计时（纳秒精度）
     auto startTime = std::chrono::high_resolution_clock::now();
+
+    size_t bytesSent = 0;
+    size_t allsendbytes = 0;
+
+
     
-    for (size_t i = 0; i < testFrames.size(); ++i) {
-        const auto& frame = testFrames[i];
-        
-        if (serial.sendFrame(frame)) {
-            successCount++;
-        } else {
-            failCount++;
-        }
-        
-        // 添加小延迟避免发送过快
-        //std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // 使用sendBufferSync方法进行批量发送
+    for (size_t i = 0; i < 25; i++)
+    {
+        bytesSent = serial.sendBufferSync(buffer, 13, false); // -1表示发送所有帧，true表示发送后清空缓冲区
+        allsendbytes += bytesSent;
     }
+    
+
+    //allsendbytes = serial.sendBufferSyncAuto(buffer);
+    
+    size_t framesSent = allsendbytes / CAN_FRAME_SIZE ;
     
     // 结束计时并计算耗时（纳秒转换为微秒）
     auto endTime = std::chrono::high_resolution_clock::now();
     auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
     double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
     
-    std::cout << "批量发送完成 - 成功: " << successCount 
-              << ", 失败: " << failCount << std::endl;
+    std::cout << "sendBufferSync批量发送完成" << std::endl;
+    std::cout << "发送字节数: " << bytesSent << " 字节" << std::endl;
+    std::cout << "发送帧数: " << framesSent << " 帧" << std::endl;
     std::cout << "批量发送总耗时: " << std::fixed << std::setprecision(2) 
               << elapsedTimeUs << " us" << std::endl;
     std::cout << "平均每帧耗时: " << std::fixed << std::setprecision(2) 
-              << (successCount > 0 ? elapsedTimeUs / successCount : 0) << " us/帧" << std::endl;
+              << (framesSent > 0 ? elapsedTimeUs / framesSent : 0) << " us/帧" << std::endl;
+    std::cout << "吞吐量: " << std::fixed << std::setprecision(2) 
+              << (framesSent > 0 ? (framesSent * 1000000.0) / elapsedTimeUs : 0) << " 帧/秒" << std::endl;
+    
+    // 验证完整性
+    if (bytesSent % CAN_FRAME_SIZE != 0) {
+        std::cerr << "[WARN][testSerialBatchSend]: 发送字节数不是13的倍数，可能存在帧完整性问题" << std::endl;
+    }
+    
+    if (framesSent != totalFrames) {
+        std::cerr << "[WARN][testSerialBatchSend]: 发送帧数(" << framesSent 
+                  << ")与预期帧数(" << totalFrames << ")不一致" << std::endl;
+    }
     
     serial.disconnect();
-    std::cout << "批量发送测试结束" << std::endl;
+    std::cout << "sendBufferSync批量发送测试结束" << std::endl;
 }
 
 /**

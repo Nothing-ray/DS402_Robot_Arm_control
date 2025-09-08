@@ -20,7 +20,7 @@
 #include <stdexcept>
 
 #include "CAN_frame.hpp"
-#include "CAN_Queue.hpp"
+#include "CircularBuffer.hpp"
 #include "SDO_State_Machine.hpp"
 #include "CLASS_Motor.hpp"
 #include "Serial_Module.hpp"
@@ -48,10 +48,8 @@
 class SendThread {
 private:
     // 通过引用访问全局资源（由主线程初始化）
-    boost::lockfree::queue<CanFrame>& sendQueue_;
-    std::queue<CanFrame>& planQueue_;
-    std::mutex& planQueueMutex_;
-    std::condition_variable& planQueueCV_;
+    CircularBuffer& sendBuffer_;        ///< 发送环形缓冲区
+    CircularBuffer& planBuffer_;        ///< 规划环形缓冲区
     std::vector<Motor>& motors_;
     SerialPortManager& serialManager_;  ///< 串口管理器引用
     
@@ -94,7 +92,7 @@ private:
             // 超时情况：不做特殊处理，自然进入下一周期
         }
     }
-    
+     
     /**
      * @brief 处理SDO帧（占位实现）
      */
@@ -124,25 +122,19 @@ public:
     /**
      * @brief 构造函数
      * 
-     * @param sendQueue 发送队列引用
-     * @param planQueue 规划队列引用
-     * @param planQueueMutex 规划队列互斥锁引用
-     * @param planQueueCV 规划队列条件变量引用
+     * @param sendBuffer 发送环形缓冲区引用
+     * @param planBuffer 规划环形缓冲区引用
      * @param motors 电机向量引用
      * @param motorCount 电机数量
      * @param serialManager 串口管理器引用
      */
-    SendThread(boost::lockfree::queue<CanFrame>& sendQueue,
-               std::queue<CanFrame>& planQueue,
-               std::mutex& planQueueMutex,
-               std::condition_variable& planQueueCV,
+    SendThread(CircularBuffer& sendBuffer,
+               CircularBuffer& planBuffer,
                std::vector<Motor>& motors,
                uint8_t motorCount,
                SerialPortManager& serialManager)
-        : sendQueue_(sendQueue)
-        , planQueue_(planQueue)
-        , planQueueMutex_(planQueueMutex)
-        , planQueueCV_(planQueueCV)
+        : sendBuffer_(sendBuffer)
+        , planBuffer_(planBuffer)
         , motors_(motors)
         , motorCount_(motorCount)
         , serialManager_(serialManager)
