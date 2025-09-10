@@ -59,10 +59,18 @@
 #include <iostream>
 #include "CAN_frame.hpp"
 
-/// @brief SDO通信超时时间定义（微秒）
-/// @details 根据CANopen标准和实时性要求设置的默认超时值
-/// @note 可根据具体网络环境和性能要求调整
-#define TIME_OUT_US 2000  // 超时时间(微秒)
+// 调试模式超时时间配置
+#ifdef ENABLE_SDO_LONG_TIMEOUT_DEBUG
+    /// @brief 调试模式下的SDO超时时间（秒级，用于手动测试）
+    /// @warning 此模式仅用于手动调试，会显著增加响应延迟！
+    #define TIME_OUT_US (20 * 1000 * 1000)  // 20秒 = 20,000,000微秒
+    #warning "SDO调试模式启用：超时时间已设置为20秒！仅用于手动测试，不适用于生产环境！"
+#else
+    /// @brief SDO通信超时时间定义（微秒）
+    /// @details 根据CANopen标准和实时性要求设置的默认超时值
+    /// @note 可根据具体网络环境和性能要求调整
+    #define TIME_OUT_US 2000  // 超时时间(微秒)
+#endif
 
 /// @brief SDO重试机制配置
 #define MAX_RETRY_COUNT 3  // 最大重试次数（2-3次）
@@ -254,6 +262,88 @@ namespace canopen {
             });
             
             std::copy_n(frame.data, copy_size, transaction.request_data.begin());
+            
+            // 清零剩余字节以确保数据一致性
+            if (copy_size < transaction.request_data.size()) {
+                std::fill(transaction.request_data.begin() + copy_size,
+                          transaction.request_data.end(), 0);
+            }
+
+            transaction.state.store(SdoState::IDLE, std::memory_order_release);
+            return transaction;
+        }
+
+        /**
+         * @brief 准备SDO事务 从13字节CAN数据直接注册
+         * @param can_bytes 13字节CAN数据数组
+         * @return 初始化好的SDO事务对象
+         * 
+         * @details 直接从13字节CAN二进制数据解析SDO事务信息，避免创建CanFrame对象
+         * - 直接解析帧ID、节点ID、对象字典索引和子索引
+         * - 直接从字节数据复制请求数据
+         * - 使用与prepareTransaction相同的验证逻辑
+         * - 性能优化，避免临时对象创建
+         * 
+         * @note 线程安全: 返回的事务对象初始状态为IDLE，可安全用于多线程环境
+         * @warning 输入can_bytes必须指向有效的13字节CAN数据
+         */
+        inline SdoTransaction prepareTransactionFromBytes(const uint8_t can_bytes[13]) {
+            SdoTransaction transaction;
+
+            // 参数验证 - 防止空指针
+            if (!can_bytes) {
+                transaction.state.store(SdoState::IDLE, std::memory_order_release);
+                return transaction;
+            }
+
+            // 直接从字节数据提取帧ID（大端序）
+            uint32_t frame_id = (static_cast<uint32_t>(can_bytes[1]) << 24) |
+                               (static_cast<uint32_t>(can_bytes[2]) << 16) |
+                               (static_cast<uint32_t>(can_bytes[3]) << 8) |
+                               static_cast<uint32_t>(can_bytes[4]);
+
+            // 使用位掩码提取SDO帧类型和节点ID（重用现有逻辑）
+            const uint32_t SDO_ID_MASK = 0x780;
+            const uint32_t SDO_REQUEST_ID = 0x600;
+            const uint32_t NODE_ID_MASK = 0x7F;
+            const uint8_t MAX_CAN_DLC = 8;
+            const uint8_t MIN_SDO_DLC = 4;
+
+            uint32_t frame_type = frame_id & SDO_ID_MASK;
+            uint8_t node_id = static_cast<uint8_t>(frame_id & NODE_ID_MASK);
+
+            // 验证帧类型、节点ID
+            if (frame_type != SDO_REQUEST_ID || node_id == 0 || node_id > 127) {
+                transaction.state.store(SdoState::IDLE, std::memory_order_release);
+                return transaction;
+            }
+
+            transaction.node_id = node_id;
+
+            // 直接从frameInfo字节提取DLC（低4位）
+            uint8_t dlc = can_bytes[0] & 0x0F;
+
+            // 安全解析对象字典索引和子索引 - 确保有足够的数据
+            if (dlc >= MIN_SDO_DLC) {
+                // 直接从字节5-12的数据区解析索引和子索引
+                // 字节5: 索引低字节，字节6: 索引高字节，字节7: 子索引
+                transaction.index = (static_cast<uint16_t>(can_bytes[6]) << 8) | can_bytes[5];
+                transaction.subindex = can_bytes[7];
+            } else {
+                // 数据长度不足，设置默认值
+                transaction.index = 0;
+                transaction.subindex = 0;
+            }
+
+            // 安全复制请求数据 - 防止缓冲区溢出
+            const size_t copy_size = std::min({
+                static_cast<size_t>(dlc),
+                static_cast<size_t>(MAX_CAN_DLC),
+                transaction.request_data.size()
+            });
+            
+            // 直接从字节5开始复制数据
+            std::copy_n(&can_bytes[5], copy_size, transaction.request_data.begin());
             
             // 清零剩余字节以确保数据一致性
             if (copy_size < transaction.request_data.size()) {

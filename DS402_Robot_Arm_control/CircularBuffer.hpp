@@ -31,6 +31,7 @@
 #include <cstring>
 #include <iostream>
 #include <iomanip>
+#include <optional>
 
 #include "CAN_frame.hpp"
 
@@ -452,6 +453,41 @@ public:
         // 通知所有等待线程
         notFull_.notify_all();
         notEmpty_.notify_all();
+    }
+    
+    /**
+     * @brief 查看但不消费数据（peek功能）
+     * @return 包含13字节数据的optional，空缓冲区时返回nullopt
+     * 
+     * @details 查看环形缓冲区中的数据但不修改读写位置
+     * - 线程安全操作，使用互斥锁保护
+     * - 只查看不消费，保持缓冲区状态不变
+     * - 返回数据副本，避免外部修改影响缓冲区
+     * 
+     * @note 主要用于SDO帧的事务性处理
+     * @warning 返回的是数据副本，不是原始缓冲区引用
+     */
+    std::optional<std::array<uint8_t, 13>> peek() const {
+        std::lock_guard<std::mutex> lock(control_.mutex_);
+        
+        if (control_.used_ < 13) {
+            return std::nullopt; // 没有足够的数据
+        }
+        
+        std::array<uint8_t, 13> data;
+        uint32_t readIndex = maskIndex(reader_.readPos_);
+        uint32_t contiguousSpace = CIRCULAR_BUFFER_CAPACITY - readIndex;
+        
+        if (13 <= contiguousSpace) {
+            // 单次读取即可完成
+            std::memcpy(data.data(), &buffer_[readIndex], 13);
+        } else {
+            // 需要分两次读取
+            std::memcpy(data.data(), &buffer_[readIndex], contiguousSpace);
+            std::memcpy(data.data() + contiguousSpace, &buffer_[0], 13 - contiguousSpace);
+        }
+        
+        return data;
     }
     
     /**
