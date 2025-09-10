@@ -57,24 +57,28 @@
 - 管理电机运行状态和参数
 - 提供原子化数据访问接口
 - 支持PDO数据自动刷新
+- 频繁读写优化设计
 
 #### 🔄 SDO状态机 (`SDO_State_Machine.hpp`)
 - 线程安全的SDO事务管理
 - 支持状态转换和超时检测
 - 智能指针生命周期管理
 - CANopen标准响应处理
+- 降低进程调度开销的优化设计
 
 #### 🗂️ PDO配置 (`PDO_config.hpp`)
+- 编译期+运行时混合配置
 - 运行时PDO映射表构建
 - COB-ID标准化转换
 - 多电机批量配置支持
-- 编译期+运行时混合配置
+- 空间换时间的查表设计
 
 #### 📦 CAN帧处理 (`CAN_frame.hpp`)
 - 串口转CAN芯片专用格式
 - 13字节固定帧结构
 - CRC-15校验算法
 - 线程安全帧操作接口
+- 详细的协议封装格式
 
 #### 🔌 串口管理 (`Serial_Module.hpp`)
 - 中心化共享实例设计
@@ -83,6 +87,27 @@
 - **周期对齐缓冲区**：24帧/周期容量限制
 - 自动错误检测和重连机制
 - 高性能异步发送优化
+
+#### 📨 线程实现
+- **发送线程** (`Send_Thread.hpp`): 单线程发送避免总线竞争
+- **接收线程** (`Read_Thread.hpp`): 实时接收和分类处理CAN帧
+- **规划线程**: 运动轨迹计算和外部指令处理
+
+#### 🔄 数据处理 (`CAN_processing.hpp`, `Data_processing.hpp`)
+- CAN帧解析和电机状态更新
+- 数据类型转换和刷新
+- 实际值到工程单位的转换
+
+#### 📦 队列管理 (`CAN_Queue.hpp`)
+- **发送队列**: 无锁队列，单生产单消费
+- **接收队列**: 无锁队列，接收数据缓冲
+- **规划队列**: 有锁队列，SDO帧优先发送
+- 使用Boost库有锁/无锁队列实现
+
+#### 🔄 环形缓冲区 (`CircularBuffer.hpp`)
+- 高性能内存缓冲区
+- 原子操作保证线程安全
+- 替代老项目实现的优化版本
 
 ## 🖥️ 运行环境
 
@@ -101,45 +126,56 @@
 
 ### 编程语言
 - **C++17**: 现代C++特性
-- **编码标准**: UTF-8中文注释
-- **文档**: Doxygen风格
+- **编码标准**: UTF-8 with BOM编码
+- **中文注释**: 所有文件使用中文和UTF8编码输出
+- **文档**: Doxygen风格注释
+- **复杂逻辑**: 使用"柯理化"准则编写
 
 ### 第三方库
-- **Boost**: 无锁队列和其他工具
-- **Pybind11**: Python绑定（可选）
+- **Boost**: 无锁队列和其他并发工具
+- **Pybind11**: Python绑定（未来支持）
 - **标准库**: STL + 并发库
 
 ### 构建系统
-- **Visual Studio**: Windows平台
-- **CMake**: 跨平台构建（计划中）
-- **Makefile**: Linux平台
+- **Windows**: Visual Studio 2022 + MSVC
+- **Linux**: g++ + CMake（计划中）
+- **接口标准**: C风格接口，支持Pybind11包装
 
 ## 📁 项目结构
 
 ```
 DS402_Robot_Arm_control/
-├── CAN_frame.hpp          # CAN帧定义和工具
-├── CAN_processing.hpp     # CAN帧解析处理
-├── CLASS_Motor.hpp        # 电机核心数据结构
-├── Data_processing.hpp    # 数据处理函数
-├── PDO_config.hpp         # PDO映射配置
-├── SDO_State_Machine.hpp  # SDO状态机
-├── Send_Thread.hpp        # 发送线程实现
-├── Serial_Module.hpp      # 串口管理模块（新增）
-├── main.cpp               # 主程序入口
-├── CAN_Queue.hpp          # 队列管理
-├── Reference/             # 参考实现
+├── DS402_Robot_Arm_control/          # 主要源代码目录
+│   ├── CAN_frame.hpp                 # CAN帧定义和工具
+│   ├── CAN_processing.hpp            # CAN帧解析处理
+│   ├── CLASS_Motor.hpp               # 电机核心数据结构
+│   ├── Data_processing.hpp           # 数据处理函数
+│   ├── PDO_config.hpp                # PDO映射配置
+│   ├── SDO_State_Machine.hpp         # SDO状态机
+│   ├── Send_Thread.hpp               # 发送线程实现
+│   ├── Read_Thread.hpp               # 接收线程实现
+│   ├── Serial_Module.hpp             # 串口管理模块
+│   ├── CAN_Queue.hpp                 # 队列管理
+│   ├── CircularBuffer.hpp            # 环形缓冲区实现
+│   └── main.cpp                      # 主程序入口
+│
+├── DS402_Robot_Arm_control/Reference/    # 老项目参考实现
 │   ├── CircularBuffer.hpp
 │   ├── motor_control.hpp
 │   ├── read_frame.hpp
 │   ├── send_frame.hpp
 │   └── Save_File.hpp
-├── test/                  # 测试文件
+│
+├── DS402_Robot_Arm_control/test/         # 测试文件
 │   ├── test_CLASS_Motor.hpp
 │   ├── test_PDO_config.hpp
 │   ├── test_PDO_processing.hpp
-│   └── test_SDO_State_Machine.hpp
-└── x64/                   # 编译输出
+│   ├── test_SDO_State_Machine.hpp
+│   ├── test_Send_Thread.hpp
+│   ├── test_Serial_Module.hpp
+│   └── test_circular_buffer.hpp
+│
+└── x64/                             # 编译输出
     ├── Debug/
     └── Release/
 ```
@@ -249,6 +285,14 @@ try {
 - **内存优化**: 缓存行对齐+原子操作
 - **帧完整性**: 100% 13字节边界保护
 
+## ⚠️ 错误处理标准
+
+- **输出格式**: `[ERROR][模块名]:错误细节`
+- **异常处理**: 支持异常抛出
+- **错误恢复**: 自动重连和状态恢复
+- **性能敏感**: 内联函数减少调用开销
+- **线程安全**: 所有操作保证线程安全
+
 ## 🛡️ 安全与可靠性增强
 
 ### 帧完整性保护
@@ -271,31 +315,45 @@ try {
 
 ## 🔮 未来规划
 
+### 核心需求
+- **CSV动作重现**: 读取CSV文件实现机械臂动作重现
+- **多机械臂支持**: 驱动多条机械臂，不同串口独立线程
+- **高级功能**: 运动学、示教、日志记录（CAN帧收发）
+
 ### 已完成功能
 - ✅ 串口管理模块与帧完整性保护
 - ✅ 周期对齐缓冲区优化
 - ✅ 多线程安全架构完善
 - ✅ 自动错误恢复机制
+- ✅ 电机类核心数据结构
+- ✅ SDO状态机和PDO配置
+- ✅ CAN帧处理和队列管理
 
 ### 短期功能
-- [ ] CSV动作重现功能
-- [ ] 完善的多机械臂支持
+- [ ] CSV文件读取和动作重现
+- [ ] 完善的多机械臂支持（不同串口）
 - [ ] 增强的错误日志系统
-- [ ] Python绑定接口
+- [ ] CAN帧收发日志记录
+- [ ] Python绑定接口（Pybind11）
 
 ### 长期功能
 - [ ] 运动学算法集成
 - [ ] 示教编程功能
 - [ ] 高级轨迹规划
 - [ ] 可视化监控界面
+- [ ] 跨平台CMake构建系统
 
 ## 🤝 贡献指南
 
-1. 遵循现有的代码风格和注释规范
-2. 使用Doxygen格式编写文档
-3. 确保线程安全和内存安全
-4. 进行充分的单元测试
-5. 优先考虑实时性和性能
+1. **代码风格**: 遵循C++17标准，使用Doxygen风格注释
+2. **编码规范**: UTF-8 with BOM编码，中文注释
+3. **线程安全**: 确保所有操作线程安全，使用原子操作和互斥锁
+4. **内存安全**: 使用智能指针管理生命周期，避免内存泄漏
+5. **性能优化**: 性能敏感部分使用内联，考虑缓存行对齐
+6. **错误处理**: 遵循`[ERROR][模块名]:错误细节`格式
+7. **单元测试**: 为新功能编写充分的测试用例
+8. **实时性**: 优先考虑2ms同步周期的硬实时要求
+9. **文档**: 更新README和代码文档，保持项目文档完整
 
 ## 📄 许可证
 

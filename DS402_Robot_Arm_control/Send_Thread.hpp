@@ -59,9 +59,9 @@ private:
     std::thread sendThread_;
     canopen::AtomicSdoStateMachine sdoStateMachine_;
     
-    // SDO批次管理（简化版）
-    std::queue<size_t> sdoBatchQueue_;                 ///< SDO批次队列，保存每批帧数量
-    std::atomic<size_t> currentBatchRemaining_{0};     ///< 当前批次剩余帧数
+    // SDO批次管理（简化状态机）
+    std::atomic<uint8_t> sdoBatchRemaining_{0};        ///< 当前批次剩余帧数（0-255，足够覆盖正常场景）
+    std::atomic<bool> sdoBatchActive_{false};           ///< 批次激活标志
     
     // 配置参数
     const uint8_t motorCount_;
@@ -69,57 +69,74 @@ private:
     // 预分配的13字节CAN帧缓冲区（避免内存分配开销）
     alignas(64) std::array<uint8_t, CAN_FRAME_SIZE> canFrameBuffer_;
     
+    // 性能监控（调试用）
+    std::chrono::steady_clock::time_point lastCycleTime_;
+    uint32_t cycleCount_{0};
+    
+    // 错误状态管理
+    enum class ThreadError {
+        NONE = 0,
+        COMMUNICATION_ERROR,
+        BATCH_ERROR,
+        SDO_TIMEOUT,
+        HARDWARE_ERROR
+    };
+    
+    std::atomic<ThreadError> lastError_{ThreadError::NONE};
+    std::atomic<uint32_t> errorCount_{0};
+    std::string lastErrorMessage_;
+    
     /**
      * @brief 发送线程主循环
      */
     void threadLoop() {
         constexpr std::chrono::milliseconds SYNC_PERIOD{2};
         
-        while (running_.load(std::memory_order_acquire)) {
+        while (running_.load(std::memory_order_relaxed)) {
             auto cycleStart = std::chrono::steady_clock::now();
             
-            try {
-                // 1. 检查是否有SDO批次需要处理
-                size_t currentRemaining = currentBatchRemaining_.load(std::memory_order_acquire);
-                bool hasActiveBatch = (currentRemaining > 0 || !sdoBatchQueue_.empty());
-                bool hasSdoFrames = planBuffer_.getUsedSpace() >= CAN_FRAME_SIZE;
+            // 周期性能监控（每1000个周期输出一次）
+            if (cycleCount_++ % 1000 == 0 && cycleCount_ > 1) {
+                auto actualPeriod = cycleStart - lastCycleTime_;
+                #ifdef ENABLE_DEBUG_OUTPUT
+                std::cout << "[DEBUG][SendThread]: "
+                          << "周期统计: 实际周期=" 
+                          << std::chrono::duration_cast<std::chrono::microseconds>(actualPeriod).count() 
+                          << "μs, 期望=" << SYNC_PERIOD.count() * 1000 << "μs" << std::endl;
+                #endif
+            }
+            lastCycleTime_ = cycleStart;
+            
+            // 1. 简化批次状态检查
+            bool hasBatch = sdoBatchActive_.load(std::memory_order_relaxed);
+            uint8_t batchRemaining = sdoBatchRemaining_.load(std::memory_order_relaxed);
+            bool hasSdoFrames = planBuffer_.getUsedSpace() >= CAN_FRAME_SIZE;
+            
+            // 2. 处理SDO帧（批次优先）
+            if (hasBatch || hasSdoFrames) {
+                size_t sdoFramesProcessed = processSdoFrames();
                 
-                // 2. 处理SDO帧（批次模式优先）
-                if (hasActiveBatch || hasSdoFrames) {
-                    size_t sdoFramesProcessed = processSdoFrames();
-                    
-                    // 检查是否可以处理PDO：当前批次完成且没有新的批次或SDO帧
-                    currentRemaining = currentBatchRemaining_.load(std::memory_order_acquire);
-                    bool canProcessPdo = (currentRemaining == 0) && 
-                                        sdoBatchQueue_.empty() && 
-                                        (sdoFramesProcessed == 0 || planBuffer_.isEmpty());
-                    
-                    // 3. 批次完成后处理PDO帧
-                    if (canProcessPdo) {
-                        processPdoFrames();
-                    }
-                } else {
-                    // 无SDO帧需要处理，直接处理PDO
+                // 3. 批次完成后自动转向PDO
+                if (!sdoBatchActive_.load(std::memory_order_relaxed) && !hasSdoFrames) {
                     processPdoFrames();
                 }
-                
-            } catch (const std::exception& e) {
-                std::cout << "[ERROR][SendThread::threadLoop]: " << e.what() << std::endl;
-                
-                // 异常时重置当前批次状态以确保安全
-                currentBatchRemaining_.store(0, std::memory_order_release);
-                // 清空批次队列防止后续问题
-                while (!sdoBatchQueue_.empty()) {
-                    sdoBatchQueue_.pop();
-                }
+            } else {
+                // 无SDO帧需要处理，直接处理PDO
+                processPdoFrames();
             }
             
-            // 不足2ms等待，超时自然跳过
+            // 高精度周期控制：忙等待确保确定性
             auto elapsed = std::chrono::steady_clock::now() - cycleStart;
             if (elapsed < SYNC_PERIOD) {
-                std::this_thread::sleep_for(SYNC_PERIOD - elapsed);
+                auto remaining = SYNC_PERIOD - elapsed;
+                auto target = cycleStart + SYNC_PERIOD;
+                
+                // 使用忙等待确保精确的2ms周期
+                while (std::chrono::steady_clock::now() < target) {
+                    // 短暂暂停避免CPU占用100%
+                    std::this_thread::sleep_for(std::chrono::microseconds(10));
+                }
             }
-            // 超时情况：不做特殊处理，自然进入下一周期
         }
     }
      
@@ -259,10 +276,7 @@ private:
                       << "SDO通信失败，强制清理状态: " << e.what() << std::endl;
             #endif
             
-            currentBatchRemaining_.store(0, std::memory_order_release);
-            while (!sdoBatchQueue_.empty()) {
-                sdoBatchQueue_.pop();
-            }
+            resetBatchState();
             throw; // 重新抛出异常，确保机械臂安全
             
         } catch (const std::exception& e) {
@@ -272,10 +286,7 @@ private:
                       << "意外异常: " << e.what() << std::endl;
             #endif
             
-            currentBatchRemaining_.store(0, std::memory_order_release);
-            while (!sdoBatchQueue_.empty()) {
-                sdoBatchQueue_.pop();
-            }
+            resetBatchState();
             sdoStateMachine_.reset();
             return 0;
         }
@@ -285,27 +296,16 @@ private:
             return 0;
         }
         
-        // 2. 检查是否需要从队列获取新批次
-        if (currentBatchRemaining_.load(std::memory_order_acquire) == 0 && !sdoBatchQueue_.empty()) {
-            size_t nextBatchSize = sdoBatchQueue_.front();
-            sdoBatchQueue_.pop();
-            currentBatchRemaining_.store(nextBatchSize, std::memory_order_release);
-            
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                      << "开始新批次，大小: " << nextBatchSize << std::endl;
-            #endif
-        }
+        // 2. 简化批次状态管理
+        uint8_t remainingInBatch = sdoBatchRemaining_.load(std::memory_order_relaxed);
+        bool batchActive = sdoBatchActive_.load(std::memory_order_relaxed);
         
-        // 3. 获取当前批次剩余帧数
-        size_t remainingInBatch = currentBatchRemaining_.load(std::memory_order_acquire);
-        
-        // 4. 批次模式处理
-        if (remainingInBatch > 0) {
+        // 3. 批次模式处理
+        if (batchActive && remainingInBatch > 0) {
             // 批次模式：按剩余批次处理
-            for (size_t i = 0; i < remainingInBatch; ++i) {
+            for (uint8_t i = 0; i < remainingInBatch; ++i) {
                 if (planBuffer_.getUsedSpace() < CAN_FRAME_SIZE) {
-                    // 缓冲区无足够数据，批次暂停
+                    // 缓冲区无足够数据，退出批次
                     break;
                 }
                 
@@ -313,41 +313,30 @@ private:
                 
                 switch (result) {
                     case SdoProcessResult::SUCCESS:
-                        currentBatchRemaining_.fetch_sub(1, std::memory_order_release);
+                        sdoBatchRemaining_.fetch_sub(1, std::memory_order_relaxed);
                         totalProcessed++;
                         break;
                     case SdoProcessResult::RETRY_NEEDED:
                         // 需要重试，暂停批次处理
-                        #ifdef ENABLE_DEBUG_OUTPUT
-                        std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                                  << "批次处理中SDO需要重试，暂停等待重试机制" << std::endl;
-                        #endif
                         return totalProcessed;
                     case SdoProcessResult::NO_FRAME:
-                        // 无可用帧，批次暂停
+                        // 无可用帧，退出批次
                         return totalProcessed;
                     case SdoProcessResult::ERROR:
-                        // 处理错误，批次失败
-                        currentBatchRemaining_.store(0, std::memory_order_release);
-                        #ifdef ENABLE_DEBUG_OUTPUT
-                        std::cout << "[ERROR][SendThread::processSdoFrames]: " 
-                                  << "批次处理中SDO帧处理失败，重置批次" << std::endl;
-                        #endif
-                        throw std::runtime_error("批次处理中SDO帧处理失败，可能影响机械臂安全控制");
+                        // 处理错误，重置批次并通知上层
+                        setLastError(ThreadError::BATCH_ERROR, "SDO帧处理失败");
+                        sdoBatchRemaining_.store(0, std::memory_order_relaxed);
+                        sdoBatchActive_.store(false, std::memory_order_relaxed);
+                        return 0;
                 }
             }
             
-            // 检查批次是否完成
-            size_t nowRemaining = currentBatchRemaining_.load(std::memory_order_acquire);
-            if (nowRemaining == 0 && totalProcessed > 0) {
-                // 批次完成
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                          << "SDO批次完成，处理帧数: " << totalProcessed << std::endl;
-                #endif
+            // 检查批次是否自动完成
+            if (sdoBatchRemaining_.load(std::memory_order_relaxed) == 0) {
+                sdoBatchActive_.store(false, std::memory_order_relaxed);
             }
         } else {
-            // 4. 传统模式处理（无批次限制）
+            // 4. 非批次模式处理
             while (planBuffer_.getUsedSpace() >= CAN_FRAME_SIZE) {
                 auto result = processSingleSdoFrame();
                 
@@ -357,21 +346,14 @@ private:
                         break;
                     case SdoProcessResult::RETRY_NEEDED:
                         // 需要重试，跳出循环
-                        #ifdef ENABLE_DEBUG_OUTPUT
-                        std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                                  << "SDO需要重试，暂停处理等待重试机制" << std::endl;
-                        #endif
                         return totalProcessed;
                     case SdoProcessResult::NO_FRAME:
                         // 无可用帧，处理完成
                         return totalProcessed;
                     case SdoProcessResult::ERROR:
-                        // 处理错误，直接抛出异常防止机械臂失控
-                        #ifdef ENABLE_DEBUG_OUTPUT
-                        std::cout << "[ERROR][SendThread::processSdoFrames]: " 
-                                  << "SDO帧处理失败，抛出异常确保安全" << std::endl;
-                        #endif
-                        throw std::runtime_error("SDO帧处理失败，可能影响机械臂安全控制");
+                        // 处理错误，设置错误状态并返回
+                        setLastError(ThreadError::SDO_TIMEOUT, "SDO帧处理失败");
+                        return 0;
                 }
             }
         }
@@ -382,25 +364,26 @@ private:
     /**
      * @brief 重置批次状态
      * 
-     * @details 安全地重置批次相关状态，用于异常恢复和批次完成清理
+     * @details 安全地重置批次相关状态，用于错误恢复
      */
     inline void resetBatchState() {
-        // 使用现有的 currentBatchRemaining_ 来重置状态
-        currentBatchRemaining_.store(0, std::memory_order_release);
-        // 清空批次队列
-        while (!sdoBatchQueue_.empty()) {
-            sdoBatchQueue_.pop();
-        }
+        sdoBatchRemaining_.store(0, std::memory_order_relaxed);
+        sdoBatchActive_.store(false, std::memory_order_relaxed);
     }
     
     /**
-     * @brief 标记批次完成
+     * @brief 设置错误状态
      * 
-     * @details 安全地标记当前批次已完成，准备下一个周期处理PDO
+     * @details 安全地设置错误状态，供上层查询
      */
-    inline void markBatchComplete() {
-        // 批次完成时只需重置当前批次剩余数
-        currentBatchRemaining_.store(0, std::memory_order_release);
+    inline void setLastError(ThreadError error, const std::string& message) {
+        lastError_.store(error, std::memory_order_relaxed);
+        errorCount_.fetch_add(1, std::memory_order_relaxed);
+        lastErrorMessage_ = message;
+        
+        #ifdef ENABLE_DEBUG_OUTPUT
+        std::cout << "[ERROR][SendThread]: " << message << std::endl;
+        #endif
     }
     
     /**
@@ -461,7 +444,7 @@ public:
      * @brief 启动发送线程
      */
     void start() {
-        if (!running_.exchange(true, std::memory_order_acq_rel)) {
+        if (!running_.exchange(true, std::memory_order_relaxed)) {
             // 线程启动前验证资源状态
             if (motors_.empty()) {
                 throw std::runtime_error("[ERROR][SendThread::start]: 电机向量未初始化");
@@ -479,7 +462,7 @@ public:
      * @brief 停止发送线程
      */
     void stop() {
-        if (running_.exchange(false, std::memory_order_acq_rel)) {
+        if (running_.exchange(false, std::memory_order_relaxed)) {
             if (sendThread_.joinable()) {
                 sendThread_.join();
             }
@@ -495,56 +478,52 @@ public:
      * @return 运行状态
      */
     bool isRunning() const {
-        return running_.load(std::memory_order_acquire);
+        return running_.load(std::memory_order_relaxed);
     }
     
     /**
      * @brief 设置SDO批次大小（供规划线程调用）
      * 
-     * @details 用于设定当前周期需要处理的SDO帧数量，实现精确批次控制。
-     * 当规划线程需要发送多个SDO帧进行状态切换时，调用此接口设定批次大小。
-     * 发送线程会在当前批次处理完成后才转向PDO处理。
+     * @details 用于设定当前周期需要处理的SDO帧数量。
+     * 采用原子操作实现线程安全的批次控制。
      * 
-     * @param batchSize 批次大小（0表示无批次限制，使用传统模式）
+     * @param batchSize 批次大小（0表示无批次限制）
      * 
-     * @note 使用原子操作确保线程安全，无需额外同步
-     * @warning 批次处理过程中新生成的SDO帧会计入下一个批次
-     * @warning 批次设置为0时返回传统模式，但会完成当前已开始批次
+     * @note 使用原子操作确保线程安全
+     * @warning 批次大小限制为0-255，超出会被截断
      */
-    void setSdoBatchSize(size_t batchSize) {
+    void setSdoBatchSize(uint8_t batchSize) {
         if (batchSize > 0) {
-            // 直接将批次大小加入队列
-            sdoBatchQueue_.push(batchSize);
+            sdoBatchRemaining_.store(batchSize, std::memory_order_relaxed);
+            sdoBatchActive_.store(true, std::memory_order_relaxed);
+        } else {
+            // 批次大小为0时停用批次模式
+            sdoBatchActive_.store(false, std::memory_order_relaxed);
         }
-        // batchSize为0时保持现有行为
         
         #ifdef ENABLE_DEBUG_OUTPUT
         std::cout << "[DEBUG][SendThread::setSdoBatchSize]: "
-                  << "新批次设置，大小: " << batchSize << std::endl;
+                  << "批次设置，大小: " << static_cast<int>(batchSize) << std::endl;
         #endif
     }
     
     /**
      * @brief 获取当前SDO批次状态
-     * @return 批次信息结构体，包含剩余帧数、总帧数、是否正在进行批次处理
+     * @return 批次信息结构体，包含剩余帧数、是否正在进行批次处理
      */
     struct SdoBatchStatus {
-        size_t remainingFrames;    ///< 剩余待处理帧数
-        size_t totalBatchSize;     ///< 批次总大小
+        uint8_t remainingFrames;   ///< 剩余待处理帧数
         bool isInProgress;         ///< 是否正在进行批次处理
-        bool isNewBatchReady;      ///< 是否有新批次就绪
         
-        SdoBatchStatus(size_t remaining, size_t total, bool progress, bool newBatch)
-            : remainingFrames(remaining), totalBatchSize(total), isInProgress(progress), isNewBatchReady(newBatch) {}
+        SdoBatchStatus(uint8_t remaining, bool progress)
+            : remainingFrames(remaining), isInProgress(progress) {}
     };
     
     SdoBatchStatus getSdoBatchStatus() const {
-        size_t remaining = currentBatchRemaining_.load(std::memory_order_acquire);
-        size_t total = remaining; // 简化处理，使用剩余数作为总数
-        bool inProgress = (remaining > 0);
-        bool newBatch = !sdoBatchQueue_.empty();
+        uint8_t remaining = sdoBatchRemaining_.load(std::memory_order_relaxed);
+        bool inProgress = sdoBatchActive_.load(std::memory_order_relaxed);
         
-        return SdoBatchStatus(remaining, total, inProgress, newBatch);
+        return SdoBatchStatus(remaining, inProgress);
     }
      
     /**
@@ -553,6 +532,46 @@ public:
      */
     canopen::AtomicSdoStateMachine& getSdoStateMachine() {
         return sdoStateMachine_;
+    }
+    
+    /**
+     * @brief 获取最后一个错误
+     * @return 错误类型
+     */
+    ThreadError getLastError() const {
+        return lastError_.load(std::memory_order_relaxed);
+    }
+    
+    /**
+     * @brief 获取错误计数
+     * @return 错误发生次数
+     */
+    uint32_t getErrorCount() const {
+        return errorCount_.load(std::memory_order_relaxed);
+    }
+    
+    /**
+     * @brief 获取错误消息
+     * @return 错误描述
+     */
+    std::string getLastErrorMessage() const {
+        return lastErrorMessage_;
+    }
+    
+    /**
+     * @brief 清除错误状态
+     */
+    void clearError() {
+        lastError_.store(ThreadError::NONE, std::memory_order_relaxed);
+        lastErrorMessage_.clear();
+    }
+    
+    /**
+     * @brief 检查线程健康状态
+     * @return true表示线程健康，false表示有错误
+     */
+    bool isHealthy() const {
+        return lastError_.load(std::memory_order_relaxed) == ThreadError::NONE;
     }
 };
 

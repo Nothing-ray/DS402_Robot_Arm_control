@@ -214,7 +214,7 @@ public:
      * @return 添加成功返回true，缓冲区满返回false
      */
     bool pushBytes(const uint8_t* data, size_t size) {
-        validateFrameSize(size);
+        validateFrameSize( size);
         
         std::unique_lock<std::mutex> controlLock(control_.mutex_);
         
