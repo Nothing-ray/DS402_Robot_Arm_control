@@ -539,12 +539,11 @@ public:
     };
     
     SdoBatchStatus getSdoBatchStatus() const {
-        size_t total = currentSdoBatchSize_.load(std::memory_order_acquire);
-        size_t processed = processedInCurrentBatch_.load(std::memory_order_acquire);
-        bool inProgress = batchInProgress_.load(std::memory_order_acquire);
-        bool newBatch = newBatchAvailable_.load(std::memory_order_acquire);
+        size_t remaining = currentBatchRemaining_.load(std::memory_order_acquire);
+        size_t total = remaining; // 简化处理，使用剩余数作为总数
+        bool inProgress = (remaining > 0);
+        bool newBatch = !sdoBatchQueue_.empty();
         
-        size_t remaining = (total > processed) ? (total - processed) : 0;
         return SdoBatchStatus(remaining, total, inProgress, newBatch);
     }
      
