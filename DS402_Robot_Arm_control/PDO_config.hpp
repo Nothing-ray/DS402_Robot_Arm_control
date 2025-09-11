@@ -207,6 +207,16 @@ inline std::vector<PdoMappingEntry> buildArmMappingTable(uint8_t motorCount) {
 
 // ====================== COB-ID转换工具 ====================== //
 
+/**
+ * @brief 计算SDO（Service Data Object）通信对象标识符
+ * @param motorIndex 电机逻辑编号（1-12）
+ * @return SDO COB-ID值（0x600 + motorIndex）
+ * @throw std::out_of_range 当电机编号超出1-12范围时抛出异常
+ * 
+ * @details SDO用于访问CANopen设备的对象字典，采用客户端-服务器通信模式。
+ *          COB-ID计算遵循CANopen标准规范：0x600作为基地址，加上电机节点ID。
+ *          例如：电机1的SDO COB-ID为0x601，电机2为0x602，依此类推。
+ */
 inline uint16_t toSdoMotorId(uint8_t motorIndex) {
     if (motorIndex == 0 || motorIndex > 12) {
         throw std::out_of_range("motorIndex must be 1..12");
@@ -214,6 +224,20 @@ inline uint16_t toSdoMotorId(uint8_t motorIndex) {
     return uint16_t(0x600 + motorIndex);
 }
 
+/**
+ * @brief 计算RPDO（Receive Process Data Object）通信对象标识符
+ * @param motorIndex 电机逻辑编号（1-12）
+ * @param pdoIndex PDO通道号（1-4）
+ * @return RPDO COB-ID值（根据通道号：0x200/0x300/0x400/0x500 + motorIndex）
+ * @throw std::out_of_range 当PDO通道号超出1-4范围时抛出异常
+ * 
+ * @details RPDO用于从主站（上位机）向从站（电机）发送过程数据，如目标位置、
+ *          速度、电流等控制指令。COB-ID分配遵循CANopen标准预定义连接集：
+ *          - RPDO1: 0x200 + motorIndex（用于目标位置、控制字等）
+ *          - RPDO2: 0x300 + motorIndex（用于目标速度、电流等）
+ *          - RPDO3: 0x400 + motorIndex（保留，可用于扩展功能）
+ *          - RPDO4: 0x500 + motorIndex（保留，可用于扩展功能）
+ */
 inline uint32_t toRpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
     switch (pdoIndex) {
     case 1: return 0x200 + motorIndex;
@@ -224,6 +248,20 @@ inline uint32_t toRpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
     }
 }
 
+/**
+ * @brief 计算TPDO（Transmit Process Data Object）通信对象标识符
+ * @param motorIndex 电机逻辑编号（1-12）
+ * @param pdoIndex PDO通道号（1-4）
+ * @return TPDO COB-ID值（根据通道号：0x180/0x280/0x380/0x480 + motorIndex）
+ * @throw std::out_of_range 当PDO通道号超出1-4范围时抛出异常
+ * 
+ * @details TPDO用于从从站（电机）向主站（上位机）发送过程数据，如实际位置、
+ *          速度、电流、状态字等反馈信息。COB-ID分配遵循CANopen标准预定义连接集：
+ *          - TPDO1: 0x180 + motorIndex（用于实际位置、状态字等）
+ *          - TPDO2: 0x280 + motorIndex（用于实际速度、电流等）
+ *          - TPDO3: 0x380 + motorIndex（保留，可用于扩展反馈数据）
+ *          - TPDO4: 0x480 + motorIndex（保留，可用于扩展反馈数据）
+ */
 inline uint32_t toTpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
     switch (pdoIndex) {
     case 1: return 0x180 + motorIndex;

@@ -34,6 +34,7 @@
 #include <sstream>
 #include <thread>       // 添加线程支持
 #include <algorithm>    // 添加算法支持
+#include <cstring>      // 添加内存操作支持
 
 #include "CAN_frame.hpp"
 #include "CircularBuffer.hpp"
@@ -349,8 +350,9 @@ public:
      * @param frames CAN帧向量，最多支持MAX_BATCH_FRAMES帧
      * @return 成功发送的帧数
      * 
-     * @details 批量发送多个CAN帧，优化发送性能。在异步模式下，所有帧会被合并
-     * 到一个缓冲区中发送；在同步模式下，使用单个write操作发送所有数据。
+     * @details 批量发送多个CAN帧，采用两阶段发送策略：第一阶段将所有帧数据一次性
+     * 拷贝到预分配缓冲区，第二阶段逐帧发送。参考sendBufferSyncAuto的实现方式，
+     * 减少内存分配开销，同时避免连续发送多帧导致的问题。
      * 
      * @note 该方法会自动处理帧数限制，超过MAX_BATCH_FRAMES的帧会被忽略。
      */
@@ -361,62 +363,102 @@ public:
         
         // 限制批量大小
         size_t actualCount = std::min(frames.size(), MAX_BATCH_FRAMES);
+        size_t totalBytesToCopy = actualCount * CAN_FRAME_SIZE;
         
-        // 同步批量发送
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
-        try {
-            // 构建批量数据缓冲区
-            std::vector<uint8_t> batchData;
-            batchData.reserve(actualCount * CAN_FRAME_SIZE);
-            
-            for (size_t i = 0; i < actualCount; ++i) {
-                const auto& binaryData = frames[i].getBinaryFrame();
-                
-                // 帧完整性验证：每个帧必须是13字节
-                if (binaryData.size() != CAN_FRAME_SIZE) {
-                    throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
-                                           std::to_string(binaryData.size()) + "字节");
-                }
-                
-                batchData.insert(batchData.end(), binaryData.begin(), binaryData.end());
-            }
-            
-            // 最终完整性检查：总字节数必须是13的整数倍
-            if (batchData.size() % CAN_FRAME_SIZE != 0) {
-                throw std::runtime_error("内部错误：批量发送数据总长度不是13字节的整数倍");
-            }
-            
-            // 开始计时（纳秒精度）
-            auto startTime = std::chrono::high_resolution_clock::now();
-            
-            // 一次性发送所有数据
-            boost::asio::write(*serialPort_, boost::asio::buffer(batchData.data(), batchData.size()));
-            
-            // 结束计时并计算耗时（纳秒转换为微秒）
-            auto endTime = std::chrono::high_resolution_clock::now();
-            auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
-            double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
-            
+        // 确保缓冲区足够大
+        if (totalBytesToCopy > sendBuffer_.size()) {
 #ifdef ENABLE_SERIAL_DEBUG
-            // 输出批量发送耗时统计
-            std::cout << "[PERF][SerialPortManager::sendFramesBatch]: "
-                      << "同步批量发送耗时: " << std::fixed << std::setprecision(2) 
-                      << elapsedTimeUs << " us, "
-                      << "帧数: " << actualCount << " 帧, "
-                      << "平均每帧: " << std::fixed << std::setprecision(2) 
-                      << (elapsedTimeUs / actualCount) << " us/帧" << std::endl;
-#endif
-            
-            return actualCount;
-        }
-        catch (const std::exception& e) {
-            connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: " << e.what() << std::endl;
+            std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
+                      << "批量帧数过多，超过预分配缓冲区大小" << std::endl;
 #endif
             return 0;
         }
+        
+#ifdef ENABLE_SERIAL_DEBUG
+        // 开始计时（纳秒精度）
+        auto startTime = std::chrono::high_resolution_clock::now();
+        std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
+                  << "开始批量发送，总帧数: " << actualCount << std::endl;
+#endif
+        
+        // 第一阶段：一次性拷贝所有帧数据到预分配缓冲区
+        for (size_t i = 0; i < actualCount; ++i) {
+            const auto& binaryData = frames[i].getBinaryFrame();
+            
+            // 帧完整性验证：每个帧必须是13字节
+            if (binaryData.size() != CAN_FRAME_SIZE) {
+#ifdef ENABLE_SERIAL_DEBUG
+                std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧长度错误：预期13字节，实际" 
+                          << std::to_string(binaryData.size()) << "字节" << std::endl;
+#endif
+                return 0; // 有帧长度错误，直接返回失败
+            }
+            
+            // 将帧数据复制到预分配缓冲区的对应位置
+            std::memcpy(sendBuffer_.data() + i * CAN_FRAME_SIZE, binaryData.data(), CAN_FRAME_SIZE);
+            
+#ifdef ENABLE_SERIAL_DEBUG
+            // 显示准备发送的帧内容
+            std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
+                      << "第 " << i << " 帧准备发送: ";
+            for (size_t j = 0; j < CAN_FRAME_SIZE; ++j) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0')
+                          << static_cast<int>(sendBuffer_[i * CAN_FRAME_SIZE + j]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+#endif
+        }
+        
+        size_t successCount = 0;
+        
+        // 第二阶段：逐帧发送
+        for (size_t i = 0; i < actualCount; ++i) {
+            try {
+                // 发送单帧数据
+                {
+                    std::lock_guard<std::mutex> lock(sendMutex_);
+                    boost::asio::write(*serialPort_, 
+                        boost::asio::buffer(sendBuffer_.data() + i * CAN_FRAME_SIZE, CAN_FRAME_SIZE));
+                }
+                
+                successCount++;
+                
+#ifdef ENABLE_SERIAL_DEBUG
+                std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧发送成功" << std::endl;
+#endif
+            }
+            catch (const std::exception& e) {
+                connected_.store(false, std::memory_order_release);
+#ifdef ENABLE_SERIAL_DEBUG
+                std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧发送失败: " << e.what() << std::endl;
+#endif
+                break; // 发送失败，停止继续发送
+            }
+        }
+        
+#ifdef ENABLE_SERIAL_DEBUG
+        // 结束计时并计算耗时（纳秒转换为微秒）
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
+        double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
+        
+        // 输出批量发送耗时统计
+        std::cout << "[PERF][SerialPortManager::sendFramesBatch]: "
+                  << "批量发送完成，成功发送: " << successCount << "/" << actualCount << " 帧, "
+                  << "总耗时: " << std::fixed << std::setprecision(2) 
+                  << elapsedTimeUs << " us";
+        
+        if (successCount > 0) {
+            std::cout << ", 平均每帧: " << std::fixed << std::setprecision(2) 
+                      << (elapsedTimeUs / successCount) << " us/帧";
+        }
+        std::cout << std::endl;
+#endif
+        
+        return successCount;
     }
     
     /**

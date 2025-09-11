@@ -62,6 +62,8 @@
 #include <atomic>
 #include <iomanip>
 #include <string>
+#include <stdexcept>
+#include "CAN_frame.hpp"
 
 /*************************************/
 /*
@@ -295,6 +297,60 @@ inline void PrintCANbinaryData(const std::vector<uint8_t>& binaryData)
 
 
 
+
+/**
+ * @brief 从二进制数据解析CAN帧，与assembleFrame()反向操作
+ * 
+ * @param binaryData 输入的13字节二进制数据向量
+ * @return CanFrame 解析后的CAN帧对象
+ * 
+ * @note 功能特性：
+ * - 验证输入数据长度（必须为13字节）
+ * - 解析帧信息字节提取DLC和标志位
+ * - 解析4字节大端序帧ID
+ * - 解析8字节数据域并按DLC截取
+ * - 返回构造完整的CanFrame对象
+ * 
+ * @par 帧格式解析：
+ * - 字节0：帧信息（DLC + FF/PTR/EDL/BRS标志位）
+ * - 字节1-4：帧ID（大端序）
+ * - 字节5-12：数据域（固定8字节）
+ * 
+ * @throws std::invalid_argument 当输入数据长度不足13字节时抛出异常
+ * 
+ * @see CanFrame::assembleFrame() 反向操作函数
+ */
+inline CanFrame parseFrame(const std::vector<uint8_t>& binaryData) {
+    // 验证输入数据长度
+    if (binaryData.size() != 13) {
+        throw std::invalid_argument("Binary data must be exactly 13 bytes for CAN frame parsing");
+    }
+    
+    // 解析帧信息字节
+    uint8_t frameInfo = binaryData[0];
+    uint8_t dlc = frameInfo & 0x0F;  // 低4位为DLC
+    bool FF = (frameInfo & 0x80) != 0;  // 第7位：帧格式标志
+    bool PTR = (frameInfo & 0x40) != 0; // 第6位：远程帧标志
+    bool EDL = (frameInfo & 0x20) != 0; // 第5位：扩展帧长度标志
+    bool BRS = (frameInfo & 0x10) != 0; // 第4位：位速率切换标志
+    
+    // 解析帧ID（4字节大端序）
+    uint32_t frameID = 0;
+    frameID = (static_cast<uint32_t>(binaryData[1]) << 24) |
+              (static_cast<uint32_t>(binaryData[2]) << 16) |
+              (static_cast<uint32_t>(binaryData[3]) << 8) |
+              (static_cast<uint32_t>(binaryData[4]));
+    
+    // 解析数据域（8字节，按DLC截取有效数据）
+    uint8_t data[8] = {0};
+    uint8_t actualDlc = (dlc > 8) ? 8 : dlc;  // 限制最大8字节
+    for (int i = 0; i < actualDlc; ++i) {
+        data[i] = binaryData[5 + i];
+    }
+    
+    // 构造并返回CanFrame对象
+    return CanFrame(frameID, data, actualDlc, FF, PTR, EDL, BRS);
+}
 
 #endif // DATA_PROCESSING_HPP
 

@@ -19,12 +19,16 @@
 #include <queue>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_map>
+#include <array>
+#include <map>
 
 #include "CAN_frame.hpp"
 #include "CircularBuffer.hpp"
 #include "SDO_State_Machine.hpp"
 #include "CLASS_Motor.hpp"
 #include "Serial_Module.hpp"
+#include "PDO_config.hpp"
 
 // 配置宏定义
 #ifndef SEND_THREAD_CONFIG_H
@@ -33,9 +37,13 @@
 // 超时处理详细模式（默认关闭）
 // #define ENABLE_DETAILED_TIMEOUT_HANDLING
 
-// 调试输出控制（默认开启）
-#ifndef DISABLE_DEBUG_OUTPUT
-#define ENABLE_DEBUG_OUTPUT
+// 调试输出控制（零开销宏）
+#ifdef ENABLE_DEBUG_OUTPUT
+#define DEBUG_PRINT(msg) do { std::cout << msg << std::endl; } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { if (cond) { std::cout << msg << std::endl; } } while(0)
+#else
+#define DEBUG_PRINT(msg) do { } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { } while(0)
 #endif
 
 #endif // SEND_THREAD_CONFIG_H
@@ -54,6 +62,9 @@ private:
     std::vector<Motor>& motors_;
     SerialPortManager& serialManager_;  ///< 串口管理器引用
     
+    // PDO映射表引用（用于构建CAN帧）
+    const std::vector<PdoMappingEntry>& pdoMappingTable_;  ///< PDO映射表引用
+    
     // 线程控制
     std::atomic<bool> running_{false};
     std::thread sendThread_;
@@ -68,6 +79,23 @@ private:
     
     // 预分配的13字节CAN帧缓冲区（避免内存分配开销）
     alignas(64) std::array<uint8_t, CAN_FRAME_SIZE> canFrameBuffer_;
+    
+    // 预分配的PDO数据结构（固定大小数组，零分配开销）
+    static constexpr size_t MAX_MOTORS = 12;
+    static constexpr size_t PDO_CHANNELS_PER_MOTOR = 2;
+    static constexpr size_t MAX_PDO_SLOTS = MAX_MOTORS * PDO_CHANNELS_PER_MOTOR;
+    
+    struct PdoDataSlot {
+        uint32_t cobId;
+        std::array<uint8_t, 8> data;
+        bool isValid;
+    };
+    
+    alignas(64) std::array<PdoDataSlot, MAX_PDO_SLOTS> pdoDataMap_;  // 缓存行对齐
+    
+    // 预分配的CAN帧数组（栈上分配，零堆开销）
+    std::array<CanFrame, MAX_PDO_SLOTS> framesToSend_;
+    size_t validFrameCount_{0};  // 有效帧计数
     
     // 性能监控（调试用）
     std::chrono::steady_clock::time_point lastCycleTime_;
@@ -86,8 +114,20 @@ private:
     std::atomic<uint32_t> errorCount_{0};
     std::string lastErrorMessage_;
     
+
+    /***********************************    主循环    ***********************************/
     /**
      * @brief 发送线程主循环
+     * 
+     * @details 重构后的主循环采用清晰的职责分离设计：
+     * - 周期管理：负责2ms同步控制和性能监控
+     * - 任务调度：协调SDO和PDO处理的优先级
+     * - 错误处理：统一的错误恢复机制
+     * 
+     * 处理优先级：
+     * 1. SDO帧（批次优先，单线程确保总线确定性）
+     * 2. PDO帧（SDO处理完成后进行）
+     * 
      */
     void threadLoop() {
         constexpr std::chrono::milliseconds SYNC_PERIOD{2};
@@ -95,133 +135,242 @@ private:
         while (running_.load(std::memory_order_relaxed)) {
             auto cycleStart = std::chrono::steady_clock::now();
             
-            // 周期性能监控（每1000个周期输出一次）
-            if (cycleCount_++ % 1000 == 0 && cycleCount_ > 1) {
-                auto actualPeriod = cycleStart - lastCycleTime_;
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[DEBUG][SendThread]: "
-                          << "周期统计: 实际周期=" 
-                          << std::chrono::duration_cast<std::chrono::microseconds>(actualPeriod).count() 
-                          << "μs, 期望=" << SYNC_PERIOD.count() * 1000 << "μs" << std::endl;
-                #endif
-            }
-            lastCycleTime_ = cycleStart;
+            // 周期监控和性能统计
+            performCycleMonitoring(cycleStart);
             
-            // 1. 简化批次状态检查
-            bool hasBatch = sdoBatchActive_.load(std::memory_order_relaxed);
-            uint8_t batchRemaining = sdoBatchRemaining_.load(std::memory_order_relaxed);
-            bool hasSdoFrames = planBuffer_.getUsedSpace() >= CAN_FRAME_SIZE;
-            
-            // 2. 处理SDO帧（批次优先）
-            if (hasBatch || hasSdoFrames) {
-                size_t sdoFramesProcessed = processSdoFrames();
-                
-                // 3. 批次完成后自动转向PDO
-                if (!sdoBatchActive_.load(std::memory_order_relaxed) && !hasSdoFrames) {
-                    processPdoFrames();
-                }
-            } else {
-                // 无SDO帧需要处理，直接处理PDO
-                processPdoFrames();
-            }
+            // 任务调度和处理
+            scheduleAndProcessTasks();
             
             // 高精度周期控制：忙等待确保确定性
-            auto elapsed = std::chrono::steady_clock::now() - cycleStart;
-            if (elapsed < SYNC_PERIOD) {
-                auto remaining = SYNC_PERIOD - elapsed;
-                auto target = cycleStart + SYNC_PERIOD;
-                
-                // 使用忙等待确保精确的2ms周期
-                while (std::chrono::steady_clock::now() < target) {
-                    // 短暂暂停避免CPU占用100%
-                    std::this_thread::sleep_for(std::chrono::microseconds(10));
-                }
+            waitForNextCycle(cycleStart, SYNC_PERIOD);
+        }
+    }
+    
+
+    /***********************************    函数模块    ***********************************/
+    
+    /**
+     * @brief 基于PDO映射表构建并发送CAN帧
+     * 
+     * @details 实现PDO数据的完整处理流程：
+     * 1. 遍历PDO映射表，识别RPDO条目
+     * 2. 从Motor类读取目标数据
+     * 3. 构建CAN帧并发送到串口
+     * 
+     * @return 成功处理的CAN帧数量
+     */
+    size_t buildAndSendPdoFrames();
+    
+    /**
+     * @brief 从电机类读取数据到PDO数据缓冲区
+     * 
+     * @param motor 电机引用
+     * @param mapping PDO映射条目
+     * @param dataBuffer 输出数据缓冲区
+     * @return 是否成功读取数据
+     */
+    bool readMotorDataToPdoBuffer(const Motor& motor, 
+                                  const PdoMappingEntry& mapping, 
+                                  uint8_t* dataBuffer);
+
+
+
+
+    /**
+     * @brief 周期监控和性能统计
+     * 
+     * @details 负责周期性能监控，每1000个周期输出一次统计信息
+     * 采用柯理化设计，将监控逻辑从主循环中分离
+     */
+    inline void performCycleMonitoring(const std::chrono::steady_clock::time_point& cycleStart) {
+        // 周期性能监控（每1000个周期输出一次）
+        if (cycleCount_++ % 1000 == 0 && cycleCount_ > 1) {
+            auto actualPeriod = cycleStart - lastCycleTime_;
+            DEBUG_PRINT("[DEBUG][SendThread]: 周期统计: 实际周期=" 
+                      << std::chrono::duration_cast<std::chrono::microseconds>(actualPeriod).count() 
+                      << "μs, 期望=" << 2000 << "μs");
+        }
+        lastCycleTime_ = cycleStart;
+    }
+    
+    /**
+     * @brief 任务调度和处理
+     * 
+     * @details 负责SDO和PDO处理的调度，采用一次性状态检查：
+     * - 避免重复的原子操作和缓冲区检查
+     * - 基于状态直接决策，消除边界情况
+     * 
+     */
+    inline void scheduleAndProcessTasks() {
+        // 1. 一次性获取处理状态（避免重复原子操作和缓冲区检查）
+        const bool hasBatch = sdoBatchActive_.load(std::memory_order_relaxed);
+        const bool hasSdoFrames = planBuffer_.getUsedSpace() >= CAN_FRAME_SIZE;
+        const bool shouldProcessSdo = hasBatch || hasSdoFrames;   //处理SDO帧
+        const bool shouldProcessPdo = !hasBatch && !hasSdoFrames; //处理PDO帧
+        
+        // 2. 优先处理SDO帧（配置和模式切换优先）
+        if (shouldProcessSdo) {
+            size_t sdoFramesProcessed = processSdoFrames();
+            
+            DEBUG_PRINT_IF(sdoFramesProcessed > 0, 
+                          "[DEBUG][SendThread::scheduleAndProcessTasks]: "
+                          "SDO处理完成，帧数: " << sdoFramesProcessed);
+        }
+        
+        // 3. SDO处理完成后处理PDO帧
+        if (shouldProcessPdo) {
+            processPdoFrames();
+            
+            DEBUG_PRINT("[DEBUG][SendThread::scheduleAndProcessTasks]: PDO处理完成");
+        }
+    }
+    
+    /**
+     * @brief 高精度周期等待
+     * 
+     * @details 使用忙等待确保精确的2ms周期，满足实时性要求
+     * 采用柯理化设计，将周期控制逻辑从主循环中分离
+     * 
+     * @param cycleStart 当前周期开始时间
+     * @param syncPeriod 同步周期（2ms）
+     */
+    inline void waitForNextCycle(const std::chrono::steady_clock::time_point& cycleStart, 
+                                const std::chrono::milliseconds& syncPeriod) {
+        auto elapsed = std::chrono::steady_clock::now() - cycleStart;
+        if (elapsed < syncPeriod) {
+            auto target = cycleStart + syncPeriod;
+            
+            // 使用忙等待确保精确的2ms周期
+            while (std::chrono::steady_clock::now() < target) {
+                // 短暂暂停避免CPU占用100%
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
         }
     }
      
+
     /**
-     * @brief 处理单帧SDO（字节级操作 + 柯理化设计）
+     * @brief SDO帧处理结果枚举
      * 
-     * @details 从规划缓冲区读取一帧SDO数据，使用预分配缓冲区和字节级操作
-     * - 使用预分配的13字节缓冲区避免内存分配
-     * - 直接从环形缓冲区读取到预分配缓冲区
-     * - 使用prepareTransactionFromBytes避免CanFrame对象创建
-     * - 柯理化设计：返回处理结果供外部决策
+     * @details 定义SDO帧处理的各种可能结果，用于精确控制发送流程。
+     * 采用枚举类确保类型安全，避免魔法数字。
      * 
-     * @return 处理结果枚举：SUCCESS, RETRY_NEEDED, NO_FRAME, ERROR
+     * 枚举值说明：
+     * - SUCCESS: 帧处理成功，SDO事务已启动并成功发送
+     * - RETRY_NEEDED: 需要重试，当前帧因状态机繁忙等原因需要延迟处理
+     * - NO_FRAME: 无可用帧，缓冲区为空或数据不足
+     * - SDO_ERROR: 处理错误，发生严重错误需要上层处理
      * 
-     * @note 使用预分配缓冲区完全避免动态内存分配
-     * @warning 必须确保缓冲区有完整的13字节CAN帧数据
+     * @note 这些结果值直接影响发送线程的决策流程
+     * @warning SDO_ERROR状态通常需要上层进行错误恢复处理
      */
     enum class SdoProcessResult {
-        SUCCESS,        ///< 处理成功
-        RETRY_NEEDED,   ///< 需要重试
-        NO_FRAME,       ///< 无可用帧
-        ERROR           ///< 处理错误
+        SUCCESS,        ///< 处理成功：SDO事务启动并发送完成
+        RETRY_NEEDED,   ///< 需要重试：状态机繁忙或暂时不可用
+        NO_FRAME,       ///< 无可用帧：缓冲区为空或数据不足
+        SDO_ERROR           ///< 处理错误：发生严重错误需要恢复
     };
     
-    inline SdoProcessResult processSingleSdoFrame() {
-        // 1. 使用peek查看数据但不消费（事务性操作）
-        auto frameData = planBuffer_.peek();//从缓冲区中读取（但是不消耗）数据来进行注册
 
-        //未读取到数据的情况
+
+    /**
+ * @brief 处理单帧SDO（字节级操作 + 柯理化设计）
+ * 
+ * @details 实现单个SDO帧的完整处理流程，从数据读取到串口发送。
+ * 采用高性能设计和错误处理机制，确保实时性和可靠性。
+ * 
+ * 核心设计特点：
+ * - **零拷贝设计**：使用预分配的13字节缓冲区，避免动态内存分配
+ * - **事务性操作**：使用peek查看数据但不消费，确保原子性
+ * - **字节级处理**：直接操作字节数据，避免CanFrame对象创建开销
+ * - **柯理化设计**：返回处理结果供上层决策，实现逻辑分离
+ * - **错误恢复**：完善的异常处理和状态清理机制
+ * 
+ * 处理流程：
+ * 1. 使用peek预检查数据可用性（不消费）
+ * 2. 通过prepareTransactionFromBytes准备SDO事务
+ * 3. 启动事务并验证状态机状态
+ * 4. 成功后消费数据并发送到串口
+ * 5. 异常情况下进行状态清理和错误报告
+ * 
+ * @return SdoProcessResult 处理结果：
+ *         - SUCCESS: 帧处理成功，SDO事务已启动
+ *         - RETRY_NEEDED: 状态机繁忙，需要延迟处理
+ *         - NO_FRAME: 缓冲区无可用数据
+ *         - SDO_ERROR: 处理过程中发生错误
+ * 
+ * @exception std::exception 处理过程中可能抛出各种异常
+ * 
+ * @note 性能优化点：
+ * - 使用64字节对齐的预分配缓冲区
+ * - 避免任何动态内存分配
+ * - 最小化函数调用开销
+ * 
+ * @warning 重要约束：
+ * - 必须确保缓冲区有完整的13字节CAN帧数据
+ * - 事务失败时必须正确清理状态机
+ * - 发送失败时需要记录错误信息
+ * 
+ * @see SdoProcessResult SDO状态机相关类
+ */
+    inline SdoProcessResult processSingleSdoFrame() {
+        // 步骤1：事务性数据预检查（使用peek确保原子性）
+        // 采用peek操作查看数据但不消费，确保后续操作的原子性
+        auto frameData = planBuffer_.peek();
+
+        // 检查数据可用性：缓冲区为空或数据不足时返回NO_FRAME
         if (!frameData.has_value()) {
             return SdoProcessResult::NO_FRAME;
         }
         
         try {
-            // 2. 使用字节级操作准备SDO事务（柯理化设计）
-            // 将读取到的CAN字节注册到状态机
+            // 步骤2：SDO事务准备（字节级操作，避免对象创建）
+            // 直接使用字节数据准备事务，避免CanFrame对象的构造开销
             auto transaction = sdoStateMachine_.prepareTransactionFromBytes(frameData->data());
             
-            // 3. 启动事务
-            if (!sdoStateMachine_.startTransaction(transaction)) {//未启动的情况
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[WARN][SendThread::processSingleSdoFrame]: "
-                          << "事务启动失败，状态机繁忙" << std::endl;
-                #endif
+            // 步骤3：事务启动（状态机状态检查）
+            // 尝试启动SDO事务，失败时表示状态机繁忙或不可用
+            if (!sdoStateMachine_.startTransaction(transaction)) {
+                DEBUG_PRINT("[WARN][SendThread::processSingleSdoFrame]: 事务启动失败，状态机繁忙");
                 return SdoProcessResult::RETRY_NEEDED;
             }
 
-            // SDO状态机启动成功
+            // 事务启动成功，进入数据消费阶段
             
-            // 4. 事务启动成功，现在可以安全消费数据
-            size_t bytesPopped = planBuffer_.popBytes(canFrameBuffer_.data(), CAN_FRAME_SIZE);//从环形缓冲区中读取出要发送的数据
-            if (bytesPopped != CAN_FRAME_SIZE) {//读取失败的情况
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[ERROR][SendThread::processSingleSdoFrame]: "
-                          << "数据消费失败，预期13字节，实际: " << bytesPopped << std::endl;
-                #endif
+            // 步骤4：数据消费（从事务性读取到实际消费）
+            // 从事务性预检查切换到实际数据消费，确保数据完整性
+            size_t bytesPopped = planBuffer_.popBytes(canFrameBuffer_.data(), CAN_FRAME_SIZE);
+            
+            // 验证数据完整性：确保成功消费完整的13字节CAN帧
+            if (bytesPopped != CAN_FRAME_SIZE) {
+                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 数据消费失败，预期13字节，实际: " << bytesPopped);
+                // 清理状态机，避免事务悬挂
                 sdoStateMachine_.completeTransaction();
-                return SdoProcessResult::ERROR;
+                return SdoProcessResult::SDO_ERROR;
             }
             
-            // 5. 使用sendBufferSync发送单帧（复用批量发送接口）
-            size_t bytesSent = serialManager_.sendBufferSync(sendBuffer_, CAN_FRAME_SIZE, false);//只发送13字节
+            // 步骤5：串口发送（使用同步发送接口）
+            // 通过串口管理器发送数据，复用批量发送接口保证一致性
+            size_t bytesSent = serialManager_.sendBufferSync(sendBuffer_, CAN_FRAME_SIZE, false);
             
-            if (bytesSent != CAN_FRAME_SIZE) {//发送不完整的情况
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[ERROR][SendThread::processSingleSdoFrame]: "
-                          << "SDO帧发送失败，预期13字节，实际: " << bytesSent << std::endl;
-                #endif
+            // 验证发送完整性：确保所有字节成功发送
+            if (bytesSent != CAN_FRAME_SIZE) {
+                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: SDO帧发送失败，预期13字节，实际: " << bytesSent);
+                // 发送失败时清理状态机，避免资源泄漏
                 sdoStateMachine_.completeTransaction();
-                return SdoProcessResult::ERROR;
+                return SdoProcessResult::SDO_ERROR;
             }
             
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[DEBUG][SendThread::processSingleSdoFrame]: "
-                      << "SDO帧发送成功，等待响应" << std::endl;
-            #endif
+            // 成功完成SDO帧处理，记录调试信息
+            DEBUG_PRINT("[DEBUG][SendThread::processSingleSdoFrame]: SDO帧发送成功，等待响应");
             
+            // 返回成功状态，SDO事务已启动并成功发送
             return SdoProcessResult::SUCCESS;
             
         } catch (const std::exception& e) {
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[ERROR][SendThread::processSingleSdoFrame]: "
-                      << "处理异常: " << e.what() << std::endl;
-            #endif
-            return SdoProcessResult::ERROR;
+            // 异常处理：捕获所有可能的异常并返回错误状态
+            DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 处理异常: " << e.what());
+            return SdoProcessResult::SDO_ERROR;
         }
     }
     
@@ -250,41 +399,29 @@ private:
             // 检查当前SDO事务是否超时
             bool needsRetry = sdoStateMachine_.checkTimeout();
             
-            #ifdef ENABLE_DEBUG_OUTPUT
             if (needsRetry) {
                 uint8_t retryCount = sdoStateMachine_.getRetryCount();
-                std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                          << "SDO超时检测，当前重试次数: " << static_cast<int>(retryCount) << "/" 
-                          << MAX_RETRY_COUNT << std::endl;
+                DEBUG_PRINT("[DEBUG][SendThread::processSdoFrames]: SDO超时检测，当前重试次数: " 
+                          << static_cast<int>(retryCount) << "/" << MAX_RETRY_COUNT);
             }
-            #endif
             
             // 如果需要重试且状态机允许重试，优先处理重试
             if (needsRetry && sdoStateMachine_.needsRetry()) {
                 retryInProgress = true;
-                #ifdef ENABLE_DEBUG_OUTPUT
-                std::cout << "[DEBUG][SendThread::processSdoFrames]: "
-                          << "SDO需要重试，将在下一周期重新发送" << std::endl;
-                #endif
+                DEBUG_PRINT("[DEBUG][SendThread::processSdoFrames]: SDO需要重试，将在下一周期重新发送");
                 return 0; // 重试优先级最高，本周期不处理新帧
             }
             
         } catch (const std::runtime_error& e) {
             // 超过最大重试次数，清理状态并重新抛出异常
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[ERROR][SendThread::processSdoFrames]: "
-                      << "SDO通信失败，强制清理状态: " << e.what() << std::endl;
-            #endif
+            DEBUG_PRINT("[ERROR][SendThread::processSdoFrames]: SDO通信失败，强制清理状态: " << e.what());
             
             resetBatchState();
             throw; // 重新抛出异常，确保机械臂安全
             
         } catch (const std::exception& e) {
             // 其他异常，记录并重置状态机
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[ERROR][SendThread::processSdoFrames]: "
-                      << "意外异常: " << e.what() << std::endl;
-            #endif
+            DEBUG_PRINT("[ERROR][SendThread::processSdoFrames]: 意外异常: " << e.what());
             
             resetBatchState();
             sdoStateMachine_.reset();
@@ -322,7 +459,7 @@ private:
                     case SdoProcessResult::NO_FRAME:
                         // 无可用帧，退出批次
                         return totalProcessed;
-                    case SdoProcessResult::ERROR:
+                    case SdoProcessResult::SDO_ERROR:
                         // 处理错误，重置批次并通知上层
                         setLastError(ThreadError::BATCH_ERROR, "SDO帧处理失败");
                         sdoBatchRemaining_.store(0, std::memory_order_relaxed);
@@ -350,7 +487,7 @@ private:
                     case SdoProcessResult::NO_FRAME:
                         // 无可用帧，处理完成
                         return totalProcessed;
-                    case SdoProcessResult::ERROR:
+                    case SdoProcessResult::SDO_ERROR:
                         // 处理错误，设置错误状态并返回
                         setLastError(ThreadError::SDO_TIMEOUT, "SDO帧处理失败");
                         return 0;
@@ -381,16 +518,17 @@ private:
         errorCount_.fetch_add(1, std::memory_order_relaxed);
         lastErrorMessage_ = message;
         
-        #ifdef ENABLE_DEBUG_OUTPUT
-        std::cout << "[ERROR][SendThread]: " << message << std::endl;
-        #endif
+        DEBUG_PRINT("[ERROR][SendThread]: " << message);
     }
     
     /**
-     * @brief 处理PDO帧（占位实现）
+     * @brief 处理PDO帧（集成PDO映射表处理）
      */
     void processPdoFrames() {
-        // 占位实现，后续完善
+        size_t processedFrames = buildAndSendPdoFrames();
+        
+        DEBUG_PRINT_IF(processedFrames > 0, 
+                      "[DEBUG][SendThread::processPdoFrames]: PDO处理完成，帧数: " << processedFrames);
     }
     
     
@@ -403,17 +541,20 @@ public:
      * @param motors 电机向量引用
      * @param motorCount 电机数量
      * @param serialManager 串口管理器引用
+     * @param pdoMappingTable PDO映射表引用
      */
     SendThread(CircularBuffer& sendBuffer,
                CircularBuffer& planBuffer,
                std::vector<Motor>& motors,
                uint8_t motorCount,
-               SerialPortManager& serialManager)
+               SerialPortManager& serialManager,
+               const std::vector<PdoMappingEntry>& pdoMappingTable)
         : sendBuffer_(sendBuffer)
         , planBuffer_(planBuffer)
         , motors_(motors)
         , motorCount_(motorCount)
         , serialManager_(serialManager)
+        , pdoMappingTable_(pdoMappingTable)
     {
         // 基础参数验证
         if (motorCount_ == 0 || motorCount_ > 12) {
@@ -427,10 +568,28 @@ public:
         // 初始化预分配缓冲区
         canFrameBuffer_.fill(0);
         
-        #ifdef ENABLE_DEBUG_OUTPUT
-        std::cout << "[INFO][SendThread]: 构造函数完成，电机数量: " 
-                  << static_cast<int>(motorCount_) << std::endl;
-        #endif
+        // 预分配PDO数据结构 - 填充所有可能的COB-ID槽位
+        
+        // 预填充所有可能的COB-ID槽位（零分配运行时）
+        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
+            pdoDataMap_[i].cobId = 0;
+            pdoDataMap_[i].data.fill(0);
+            pdoDataMap_[i].isValid = false;
+        }
+        
+        // 预填充当前电机配置的COB-ID
+        size_t slotIndex = 0;
+        for (uint8_t motorIndex = 1; motorIndex <= motorCount_; ++motorIndex) {
+            for (uint8_t pdoIndex = 1; pdoIndex <= PDO_CHANNELS_PER_MOTOR; ++pdoIndex) {
+                uint32_t cobId = toRpdoCobId(motorIndex, pdoIndex);
+                pdoDataMap_[slotIndex].cobId = cobId;
+                pdoDataMap_[slotIndex].data.fill(0);
+                pdoDataMap_[slotIndex].isValid = true;
+                slotIndex++;
+            }
+        }
+        
+        DEBUG_PRINT("[INFO][SendThread]: 构造函数完成，电机数量: " << static_cast<int>(motorCount_));
     }
     
     /**
@@ -452,9 +611,7 @@ public:
             
             sendThread_ = std::thread(&SendThread::threadLoop, this);
             
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[INFO][SendThread::start]: 线程已启动" << std::endl;
-            #endif
+            DEBUG_PRINT("[INFO][SendThread::start]: 线程已启动");
         }
     }
     
@@ -467,9 +624,7 @@ public:
                 sendThread_.join();
             }
             
-            #ifdef ENABLE_DEBUG_OUTPUT
-            std::cout << "[INFO][SendThread::stop]: 线程已停止" << std::endl;
-            #endif
+            DEBUG_PRINT("[INFO][SendThread::stop]: 线程已停止");
         }
     }
     
@@ -501,10 +656,7 @@ public:
             sdoBatchActive_.store(false, std::memory_order_relaxed);
         }
         
-        #ifdef ENABLE_DEBUG_OUTPUT
-        std::cout << "[DEBUG][SendThread::setSdoBatchSize]: "
-                  << "批次设置，大小: " << static_cast<int>(batchSize) << std::endl;
-        #endif
+        DEBUG_PRINT("[DEBUG][SendThread::setSdoBatchSize]: 批次设置，大小: " << static_cast<int>(batchSize));
     }
     
     /**
@@ -573,8 +725,214 @@ public:
     bool isHealthy() const {
         return lastError_.load(std::memory_order_relaxed) == ThreadError::NONE;
     }
+    
+    // ====================== PDO处理函数实现 ======================
+    
+    /**
+     * @brief 基于PDO映射表构建并发送CAN帧的实现
+     * 
+     * 优化要点：
+     * 1. 按需清零：只清零实际使用的PDO槽位，避免无效内存操作
+     * 2. 单次扫描：合并数据检查和帧构建，消除重复扫描
+     * 3. 栈分配：使用固定大小数组，完全消除堆分配风险
+     */
+    inline size_t buildAndSendPdoFrames() {
+        size_t totalFramesProcessed = 0;
+        
+        // 步骤1：智能清零 - 只清零当前电机配置对应的槽位
+        for (const auto& mapping : pdoMappingTable_) {//在PDO映射表中进行搜索
+            if (!mapping.isTx) {  // 只处理RPDO 
+                // 映射表由buildArmMappingTable()生成，索引早已合法
+                // 生成COB-ID
+                uint32_t cobId = toRpdoCobId(mapping.motorIndex, mapping.pdoIndex);
+                
+                // 查找并清零对应的槽位
+                for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
+                    if (pdoDataMap_[i].isValid && pdoDataMap_[i].cobId == cobId) {
+                        pdoDataMap_[i].data.fill(0);  // 按需清零，只清8B
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 步骤2：数据准备 - 填充PDO数据
+        for (const auto& mapping : pdoMappingTable_) {
+            // 只处理RPDO（发送帧）
+            if (!mapping.isTx) {
+                // 映射表由buildArmMappingTable()生成，索引早已合法
+                // 获取对应电机引用
+                const Motor& motor = motors_[mapping.motorIndex - 1];
+                
+                // 生成COB-ID
+                uint32_t cobId = toRpdoCobId(mapping.motorIndex, mapping.pdoIndex);
+                
+                // 查找预分配的槽位（O(1)查找）
+                PdoDataSlot* targetSlot = nullptr;
+                for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
+                    if (pdoDataMap_[i].isValid && pdoDataMap_[i].cobId == cobId) {
+                        targetSlot = &pdoDataMap_[i];
+                        break;
+                    }
+                }
+                
+                if (!targetSlot) {
+                    continue;  // 找不到对应的槽位（理论上不应该发生）
+                }
+                
+                // 从电机读取数据到PDO缓冲区
+                if (!readMotorDataToPdoBuffer(motor, mapping, targetSlot->data.data())) {
+                    continue;
+                }
+            }
+        }
+        
+        // 步骤3：单次扫描构建CAN帧（合并数据检查和帧构建）
+        validFrameCount_ = 0;  // 重置有效帧计数
+        
+        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {1
+            if (!pdoDataMap_[i].isValid) {
+                continue;
+            }
+            
+            // 检查是否有有效数据（非全零）
+            bool hasData = false;
+            for (uint8_t byte : pdoDataMap_[i].data) {
+                if (byte != 0) {
+                    hasData = true;
+                    break;
+                }
+            }
+            
+            if (hasData) {
+                // 直接在数组中构建CAN帧（零堆分配）
+                CanFrame& frame = framesToSend_[validFrameCount_];
+                frame.frameID = pdoDataMap_[i].cobId;
+                frame.dlc = 8;
+                std::copy(pdoDataMap_[i].data.begin(), pdoDataMap_[i].data.end(), frame.data);
+                frame.frameInfo = 0;  // 默认帧信息
+                frame.assembleFrame();  // 组装二进制帧
+                
+                validFrameCount_++;
+            }
+        }
+        
+        // 步骤4：批量发送CAN帧
+        if (validFrameCount_ > 0) {
+            try {
+                // 直接使用预分配数组发送，避免vector拷贝开销
+                size_t sentFrames = serialManager_.sendFramesBatch(
+                    {framesToSend_.data(), framesToSend_.data() + validFrameCount_});
+                totalFramesProcessed = sentFrames;
+            } catch (const std::exception& e) {
+                setLastError(ThreadError::COMMUNICATION_ERROR, 
+                           std::string("PDO批量发送失败: ") + e.what());
+                return 0;
+            }
+        }
+        
+        return totalFramesProcessed;
+    }
+    
+    /**
+     * @brief 从电机类读取数据到PDO数据缓冲区的实现
+     * 
+     * @details 该函数根据PDO映射表条目从电机对象中读取指定的数据，并将其复制到PDO数据缓冲区的正确位置。
+     *          支持多种类型的数据读取，包括位置、速度、电流和控制字等。该函数采用类型安全的方式
+     *          处理不同数据类型的原子操作，确保多线程环境下的数据一致性。
+     * 
+     * @param motor 电机对象的常量引用，包含要读取的数据
+     * @param mapping PDO映射表条目，定义了数据源和目标位置
+     * @param dataBuffer 指向PDO数据缓冲区的指针，用于存储读取的数据
+     * 
+     * @return bool 成功返回true，失败返回false
+     * 
+     * @note 
+     * - 函数内部进行参数有效性检查，包括空指针检查和偏移量边界检查
+     * - 使用原子操作读取电机数据，确保线程安全
+     * - 支持的数据类型包括目标位置、控制字、目标速度（两种模式）、目标电流
+     * - 异常处理机制确保程序稳定性
+     * 
+     * @warning 
+     * - 调用者需确保dataBuffer有足够的空间（至少offsetInPdo + mapping.size字节）
+     * - mapping参数必须包含有效的对象字典索引和偏移量信息
+     * 
+     * @par 支持的对象字典索引：
+     * - OD_TARGET_POSITION: 目标位置数据（32位整数）
+     * - OD_CONTROL_WORD: 控制字数据（16位整数）
+     * - OD_TARGET_VELOCITY_VELOCITY_MODE: 目标速度（速度模式）
+     * - OD_TARGET_CURRENT: 目标电流数据
+     * - OD_TARGET_VELOCITY_POSITION_MODE: 目标速度（位置模式）
+     * 
+     * @par 错误处理：
+     * - 空指针检查：dataBuffer不能为nullptr
+     * - 偏移量检查：offsetInPdo + dataSize不能超过8字节（PDO最大长度）
+     * - 异常捕获：任何数据读取异常都会被捕获并记录
+     * 
+     * @see PdoMappingEntry Motor AlignedRawData
+     */
+    inline bool readMotorDataToPdoBuffer(const Motor& motor, 
+                                        const PdoMappingEntry& mapping, 
+                                        uint8_t* dataBuffer) {
+        if (!dataBuffer) {
+            return false;
+        }
+        
+        try {
+            // 根据对象字典索引和字段偏移量确定数据源
+            uint16_t odIndex = mapping.index;
+            size_t fieldOffset = mapping.motorFieldOffset;
+            uint8_t dataSize = mapping.size;
+            uint8_t offsetInPdo = mapping.offsetInPdo;
+            
+            // 确保偏移量有效
+            if (offsetInPdo + dataSize > 8) {
+                DEBUG_PRINT("[ERROR][SendThread::readMotorDataToPdoBuffer]: PDO偏移量越界，偏移: " 
+                          << static_cast<int>(offsetInPdo) << ", 大小: " << static_cast<int>(dataSize));
+                return false;
+            }
+            
+            // 根据对象字典索引确定数据源和读取方式
+            if (odIndex == OD_TARGET_POSITION) {
+                // 目标位置数据
+                Position_type value = motor.position.raw_target.atomicReadValue();
+                std::memcpy(dataBuffer + offsetInPdo, &value, dataSize);
+            }
+            else if (odIndex == OD_CONTROL_WORD) {
+                // 控制字数据
+                uint16_t value;
+                std::memcpy(&value, motor.stateAndMode.controlData.controlWordRaw, 2);
+                std::memcpy(dataBuffer + offsetInPdo, &value, dataSize);
+            }
+            else if (odIndex == OD_TARGET_VELOCITY_VELOCITY_MODE) {
+                // 目标速度数据（速度模式）
+                Velocity_type value = motor.velocity.raw_target_velocity_mode.atomicReadValue();
+                std::memcpy(dataBuffer + offsetInPdo, &value, dataSize);
+            }
+            else if (odIndex == OD_TARGET_CURRENT) {
+                // 目标电流数据
+                Current_type value = motor.current.raw_target.atomicReadValue();
+                std::memcpy(dataBuffer + offsetInPdo, &value, dataSize);
+            }
+            else if (odIndex == OD_TARGET_VELOCITY_POSITION_MODE) {
+                // 目标速度数据（位置模式）
+                Velocity_type value = motor.velocity.raw_target_position_mode.atomicReadValue();
+                std::memcpy(dataBuffer + offsetInPdo, &value, dataSize);
+            }
+            else {
+                DEBUG_PRINT("[WARN][SendThread::readMotorDataToPdoBuffer]: 未知的对象字典索引: 0x" 
+                          << std::hex << odIndex << std::dec);
+                return false;
+            }
+            
+            return true;
+            
+        } catch (const std::exception& e) {
+            DEBUG_PRINT("[ERROR][SendThread::readMotorDataToPdoBuffer]: 读取数据异常: " << e.what());
+            return false;
+        }
+    }
 };
 
 
-#undef ENABLE_DEBUG_OUTPUT
 #endif // SEND_THREAD_HPP

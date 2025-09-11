@@ -18,11 +18,12 @@
 // #include "CAN_Queue.hpp"
 
 // #include "test/test_CLASS_Motor.hpp"
-// #include "test/test_PDO_config.hpp"
+#include "test/test_PDO_config.hpp"
 // #include "test/test_PDO_processing.hpp"
-// #include "test/test_SDO_State_Machine.hpp"
+#include "test/test_SDO_State_Machine.hpp"
 #include "test/test_Serial_Module.hpp"
 #include "test/test_circular_buffer.hpp"
+#include "test/test_Send_Thread.hpp"
 #include "Serial_Module.hpp"
 
 
@@ -64,11 +65,16 @@ int main(){
     //testSdoTimeoutRetryMechanism();
 
     //testSerialBasicSend("COM10");
-    testSerialBatchSend("COM10");
+    //testSerialBatchSend("COM10");
     //testSerialRealBatchSend("COM10");
 
 
-
+    testSDOStateMachineMultiThreadPerformance();
+    
+    // 测试发送线程PDO功能
+    testSendThreadPdoMapping();      // 简单的PDO映射测试
+    testSendThreadPdoFunction();     // 完整的PDO功能测试
+    
     // 环形缓冲区理论性能测试
     //testTheoreticalPerformance();
     //testBatchTheoreticalPerformance();
