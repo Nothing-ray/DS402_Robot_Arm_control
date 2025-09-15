@@ -60,11 +60,16 @@
 #include "CAN_frame.hpp"
 
 // 调试模式超时时间配置
-#ifdef ENABLE_SDO_LONG_TIMEOUT_DEBUG
+
+#define ENABLE_SDO_LONG_TIMEOUT_DEBUG   1
+
+#if ENABLE_SDO_LONG_TIMEOUT_DEBUG 
     /// @brief 调试模式下的SDO超时时间（秒级，用于手动测试）
     /// @warning 此模式仅用于手动调试，会显著增加响应延迟！
     #define TIME_OUT_US (20 * 1000 * 1000)  // 20秒 = 20,000,000微秒
-    #warning "SDO调试模式启用：超时时间已设置为20秒！仅用于手动测试，不适用于生产环境！"
+    #ifdef _MSC_VER
+        #pragma message("SDO调试模式启用：超时时间已设置为20秒！仅用于手动测试，不适用于生产环境！")
+    #endif
 #else
     /// @brief SDO通信超时时间定义（微秒）
     /// @details 根据CANopen标准和实时性要求设置的默认超时值
@@ -74,6 +79,10 @@
 
 /// @brief SDO重试机制配置
 #define MAX_RETRY_COUNT 3  // 最大重试次数（2-3次）
+
+#define DEBUG_OUTPUT 1
+
+
 
 namespace canopen {
 
@@ -163,9 +172,9 @@ namespace canopen {
             request_data(std::move(other.request_data)),
             response_data(std::move(other.response_data)),
             response_dlc(other.response_dlc),
-            state(other.state.load(std::memory_order_acquire)),
-            response_type(other.response_type.load(std::memory_order_acquire)),
-            retry_count(other.retry_count.load(std::memory_order_acquire)) {
+            state(other.state.load(std::memory_order_relaxed)),
+            response_type(other.response_type.load(std::memory_order_relaxed)),
+            retry_count(other.retry_count.load(std::memory_order_relaxed)) {
         }
 
         /**
@@ -179,9 +188,9 @@ namespace canopen {
                 request_data = std::move(other.request_data);
                 response_data = std::move(other.response_data);
                 response_dlc = other.response_dlc;
-                state.store(other.state.load(std::memory_order_acquire), std::memory_order_release);
-                response_type.store(other.response_type.load(std::memory_order_acquire), std::memory_order_release);
-                retry_count.store(other.retry_count.load(std::memory_order_acquire), std::memory_order_release);
+                state.store(other.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                response_type.store(other.response_type.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                retry_count.store(other.retry_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
             }
             return *this;
         }
@@ -292,9 +301,21 @@ namespace canopen {
 
             // 参数验证 - 防止空指针
             if (!can_bytes) {
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][prepareTransactionFromBytes]: 输入参数为空指针" << std::endl;
+#endif
                 transaction.state.store(SdoState::IDLE, std::memory_order_release);
                 return transaction;
             }
+
+#if DEBUG_OUTPUT
+            // 调试输出：显示输入字节
+            std::cout << "[DEBUG][prepareTransactionFromBytes]: 输入字节: ";
+            for (int i = 0; i < 13 && i < 8; ++i) {
+                std::cout << std::hex << "0x" << static_cast<int>(can_bytes[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+#endif
 
             // 直接从字节数据提取帧ID（大端序）
             uint32_t frame_id = (static_cast<uint32_t>(can_bytes[1]) << 24) |
@@ -312,8 +333,16 @@ namespace canopen {
             uint32_t frame_type = frame_id & SDO_ID_MASK;
             uint8_t node_id = static_cast<uint8_t>(frame_id & NODE_ID_MASK);
 
+            #if DEBUG_OUTPUT
             // 验证帧类型、节点ID
+            std::cout << "[DEBUG][prepareTransactionFromBytes]: 帧类型: 0x" << std::hex << frame_type
+                      << ", 期望: 0x" << SDO_REQUEST_ID << ", 节点ID: " << std::dec << static_cast<int>(node_id) << std::endl;
+#endif
+
             if (frame_type != SDO_REQUEST_ID || node_id == 0 || node_id > 127) {
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][prepareTransactionFromBytes]: 帧验证失败，返回IDLE状态" << std::endl;
+#endif
                 transaction.state.store(SdoState::IDLE, std::memory_order_release);
                 return transaction;
             }
@@ -329,10 +358,19 @@ namespace canopen {
                 // 字节5: 索引低字节，字节6: 索引高字节，字节7: 子索引
                 transaction.index = (static_cast<uint16_t>(can_bytes[6]) << 8) | can_bytes[5];
                 transaction.subindex = can_bytes[7];
+
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][prepareTransactionFromBytes]: 解析成功 - 索引: 0x" << std::hex << transaction.index
+                          << ", 子索引: 0x" << static_cast<int>(transaction.subindex) << std::dec << std::endl;
+#endif
             } else {
                 // 数据长度不足，设置默认值
                 transaction.index = 0;
                 transaction.subindex = 0;
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][prepareTransactionFromBytes]: 数据长度不足 (DLC=" << static_cast<int>(dlc)
+                          << "), 使用默认值" << std::endl;
+#endif
             }
 
             // 安全复制请求数据 - 防止缓冲区溢出
@@ -352,50 +390,144 @@ namespace canopen {
             }
 
             transaction.state.store(SdoState::IDLE, std::memory_order_release);
+
+#if DEBUG_OUTPUT
+            std::cout << "[DEBUG][prepareTransactionFromBytes]: 事务准备完成，节点ID: " << static_cast<int>(transaction.node_id)
+                      << ", 索引: 0x" << std::hex << transaction.index << std::dec << std::endl;
+#endif
+
             return transaction;
         }
 
         /**
-         * @brief 开始SDO事务（内存栅栏保护） 归零重试计数器
+         * @brief 创建并启动SDO事务（统一接口）
+         * @param node_id 目标节点ID（1-127，符合CANopen标准）
+         * @param index 对象字典索引
+         * @param subindex 对象字典子索引
+         * @param data 要发送的数据（可选，默认为空）
+         * @return 是否成功创建并启动事务
+         *
+         * @details 统一的事务创建和启动接口，符合状态机作为事务持有者的设计理念
+         * - 在状态机内部创建事务对象，避免外部管理生命周期
+         * - 自动初始化事务状态和重试计数器
+         * - 线程安全的状态转换和事务管理
+         * - 提供便捷的数据设置接口
+         * - 验证节点ID有效性（1-127），符合CANopen标准
+         *
+         * @note 这是推荐的新接口，替代之前的事务对象传递方式
+         * @warning 状态机只能同时处理一个事务，重复调用会返回失败
+         * @warning 节点ID必须在1-127范围内，否则返回false
+         */
+        inline bool createAndStartTransaction(uint8_t node_id, uint16_t index, uint8_t subindex,
+                                            const std::array<uint8_t, 8>& data = {}) {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            // 检查是否已有活跃事务
+            if (current_transaction_) {
+                return false;
+            }
+
+            // 验证节点ID有效性（CANopen标准：1-127）
+            if (node_id < 1 || node_id > 127) {
+                return false;
+            }
+
+            // 在状态机内部创建事务对象
+            current_transaction_.emplace();
+
+            // 初始化事务参数
+            current_transaction_->node_id = node_id;
+            current_transaction_->index = index;
+            current_transaction_->subindex = subindex;
+
+            // 复制数据到事务
+            if (!data.empty()) {
+                std::copy_n(data.begin(), std::min(data.size(), current_transaction_->request_data.size()),
+                           current_transaction_->request_data.begin());
+            }
+
+            // 初始化事务状态
+            current_transaction_->state.store(SdoState::WAITING_RESPONSE, std::memory_order_release);
+            current_transaction_->retry_count.store(0, std::memory_order_release);
+            current_transaction_->response_type.store(SdoResponseType::UNKNOWN, std::memory_order_release);
+
+            // 设置开始时间
+            start_time_ = std::chrono::steady_clock::now();
+
+            // 内存栅栏，确保数据写入对所有线程可见
+            std::atomic_thread_fence(std::memory_order_release);
+
+            // 验证状态设置是否成功
+            SdoState verify_state = current_transaction_->state.load(std::memory_order_acquire);
+            bool transaction_exists = current_transaction_.has_value();
+
+            // 设置事务保护标志，防止意外清除
+            transaction_protected_ = true;
+
+#if DEBUG_OUTPUT
+            std::cout << "[DEBUG][createAndStartTransaction]: 事务创建并启动成功" << std::endl;
+            std::cout << "[DEBUG][createAndStartTransaction]: 节点ID: " << static_cast<int>(node_id)
+                << ", 索引: 0x" << std::hex << index << std::dec << std::endl;
+            std::cout << "[DEBUG][createAndStartTransaction]: 事务存在性: " << (transaction_exists ? "是" : "否") << std::endl;
+            std::cout << "[DEBUG][createAndStartTransaction]: 验证状态: " << static_cast<int>(verify_state)
+                << " (期望: " << static_cast<int>(SdoState::WAITING_RESPONSE) << ")" << std::endl;
+            std::cout << "[DEBUG][createAndStartTransaction]: 内存地址: " << &(*current_transaction_) << std::endl;
+            std::cout << "[DEBUG][createAndStartTransaction]: 保护标志已设置" << std::endl;
+#endif // DEBUG_OUTPUT
+
+            
+
+            return true;
+        }
+
+        /**
+         * @brief 开始SDO事务（内存栅栏保护）归零重试计数器（向后兼容版本）
          * @param transaction 要开始的事务对象引用
          * @return 是否成功开始事务
-         * 
+         *
          * @details 安全开始SDO事务，使用智能指针管理生命周期
          * - 原子比较交换确保状态为IDLE时才开始
          * - 使用shared_ptr避免悬挂指针风险
          * - 线程安全的状态转换和时间记录
          * - 自动初始化重试计数器
-         * 
+         *
          * @note 事务对象的生命周期由shared_ptr管理，防止悬挂指针
          * @warning 只有在事务状态为IDLE时才能成功开始
          */
         inline bool startTransaction(SdoTransaction& transaction) {
-            SdoState expected = SdoState::IDLE;
+            // 创建shared_ptr包装原始对象，避免复制
+            auto transaction_ptr = std::shared_ptr<SdoTransaction>(&transaction, [](auto*){});
+            return startTransaction(transaction_ptr);
+        }
 
-            // 原子比较交换确保状态为IDLE时转换
-            if (transaction.state.compare_exchange_strong(expected,
-                SdoState::WAITING_RESPONSE,
-                std::memory_order_acq_rel,
-                std::memory_order_acquire)) {
-
-                std::lock_guard<std::mutex> lock(mutex_);
-                
-                // 重置重试计数器
-                transaction.retry_count.store(0, std::memory_order_release);
-                
-                // 使用shared_ptr保证对象生命周期安全
-                // 通过std::shared_ptr的aliasing constructor共享所有权 
-                //对处理当前事务的智能指针初始化
-                current_transaction_ = std::shared_ptr<SdoTransaction>(
-                    std::shared_ptr<SdoTransaction>{}, &transaction);
-                
-                start_time_ = std::chrono::steady_clock::now();
-
-                // 内存栅栏，确保数据写入对所有线程可见
-                std::atomic_thread_fence(std::memory_order_release);
-                return true;
+        /**
+         * @brief 开始SDO事务（内存栅栏保护）归零重试计数器
+         * @param transaction 要开始的事务对象智能指针
+         * @return 是否成功开始事务
+         *
+         * @details 安全开始SDO事务，使用智能指针管理生命周期
+         * - 原子比较交换确保状态为IDLE时才开始
+         * - 使用shared_ptr避免悬挂指针风险
+         * - 线程安全的状态转换和时间记录
+         * - 自动初始化重试计数器
+         *
+         * @note 事务对象的生命周期由shared_ptr管理，防止悬挂指针
+         * @warning 只有在事务状态为IDLE时才能成功开始
+         */
+        inline bool startTransaction(std::shared_ptr<SdoTransaction> transaction) {
+            // 智能指针版本已废弃，请使用createAndStartTransaction方法
+            // 为了向后兼容，这里复制事务数据到状态机内部
+            if (!transaction) {
+                return false;
             }
-            return false;
+
+            // 使用新的统一接口
+            return createAndStartTransaction(
+                transaction->node_id,
+                transaction->index,
+                transaction->subindex,
+                transaction->request_data
+            );
         }
 
         /**
@@ -421,13 +553,10 @@ namespace canopen {
                 return false;
             }
 
-            std::unique_lock<std::mutex> lock(mutex_);
-
-            // 使用shared_ptr安全获取当前事务引用，防止TOCTOU问题
-            auto transaction_ptr = current_transaction_;
-            if (!transaction_ptr ||
-                transaction_ptr->state.load(std::memory_order_acquire) != SdoState::WAITING_RESPONSE ||
-                transaction_ptr->node_id != node_id) {
+            // 使用统一的事务访问方法，确保线程安全
+            if (!current_transaction_ ||
+                current_transaction_->state.load(std::memory_order_acquire) != SdoState::WAITING_RESPONSE ||
+                current_transaction_->node_id != node_id) {
                 return false;
             }
 
@@ -437,32 +566,32 @@ namespace canopen {
                 static_cast<size_t>(8),  // response_data数组最大大小
                 current_transaction_->response_data.size()
             });
-            
-            std::copy_n(response_data, copy_size, transaction_ptr->response_data.begin());
-            
+
+            std::copy_n(response_data, copy_size, current_transaction_->response_data.begin());
+
             // 清零剩余字节以确保数据一致性
-            if (copy_size < transaction_ptr->response_data.size()) {
-                std::fill(transaction_ptr->response_data.begin() + copy_size,
-                          transaction_ptr->response_data.end(), 0);
+            if (copy_size < current_transaction_->response_data.size()) {
+                std::fill(current_transaction_->response_data.begin() + copy_size,
+                          current_transaction_->response_data.end(), 0);
             }
-            
-            transaction_ptr->response_dlc = dlc;
+
+            current_transaction_->response_dlc = dlc;
 
             // 安全获取命令字节 - 验证数据有效性
             uint8_t command = (dlc > 0) ? response_data[0] : 0;
             SdoResponseType response_type = classifyResponse(command);
 
             // 原子更新响应类型和状态
-            transaction_ptr->response_type.store(response_type, std::memory_order_release);
+            current_transaction_->response_type.store(response_type, std::memory_order_release);
 
             SdoState new_state = (response_type == SdoResponseType::ERROR_RESPONSE) ?
                 SdoState::RESPONSE_ERROR : SdoState::RESPONSE_VALID;
 
-            transaction_ptr->state.store(new_state, std::memory_order_release);
-            
+            current_transaction_->state.store(new_state, std::memory_order_release);
+
             // 重试成功，清零重试计数器
             if (new_state == SdoState::RESPONSE_VALID) {
-                transaction_ptr->retry_count.store(0, std::memory_order_release);
+                current_transaction_->retry_count.store(0, std::memory_order_release);
             }
 
             // 内存栅栏，确保状态更新对所有线程可见
@@ -477,37 +606,30 @@ namespace canopen {
          * @brief 等待响应或超时
          * @param timeout_us 超时时间（微秒）
          * @return 是否在超时前收到响应
-         */
-        /**
-         * @brief 等待响应或超时
-         * @param timeout_us 超时时间（微秒）
-         * @return 是否在超时前收到响应
-         * 
+         *
          * @details 安全等待SDO事务响应，防止空指针访问和伪唤醒
-         * - 使用shared_ptr安全检查事务存在性
+         * - 检查事务存在性，避免空指针访问
          * - 条件变量等待状态变化，防止伪唤醒
          * - 自动处理超时情况
-         * 
-         * @note 使用lambda捕获shared_ptr副本防止竞争条件
+         *
+         * @note 由于事务对象由状态机管理，不存在生命周期问题
          * @warning 只有在事务存在且状态正确时才返回true
          */
         inline bool waitForResponse(uint32_t timeout_us = TIME_OUT_US) {
             std::unique_lock<std::mutex> lock(mutex_);
 
-            // 获取shared_ptr副本用于lambda捕获
-            auto transaction_ptr = current_transaction_;
-            if (!transaction_ptr) {
+            // 检查事务存在性
+            if (!current_transaction_) {
                 return false;
             }
 
-            // 使用条件变量等待状态变化，捕获shared_ptr副本防止竞争
+            // 使用条件变量等待状态变化，由于事务对象由状态机管理，不存在生命周期问题
             return condition_.wait_for(lock, std::chrono::microseconds(timeout_us),
-                [transaction_ptr]() {
-                    // 使用捕获的shared_ptr副本，防止在lambda执行过程中指针被释放
-                    if (!transaction_ptr) {
+                [this]() {
+                    if (!current_transaction_) {
                         return false;  // 事务不存在，停止等待
                     }
-                    auto state = transaction_ptr->state.load(std::memory_order_acquire);
+                    auto state = current_transaction_->state.load(std::memory_order_acquire);
                     return state == SdoState::RESPONSE_VALID ||
                         state == SdoState::RESPONSE_ERROR ||
                         state == SdoState::TIMEOUT ||
@@ -530,61 +652,60 @@ namespace canopen {
         inline bool checkTimeout() {
             std::lock_guard<std::mutex> lock(mutex_);
 
-            // 使用shared_ptr安全获取当前事务引用
-            auto transaction_ptr = current_transaction_;
-
-            //如果为空指针或者状态机不在等待状态则返回为错误
-            if (!transaction_ptr ||
-                transaction_ptr->state.load(std::memory_order_acquire) != SdoState::WAITING_RESPONSE) {
+            // 如果为空指针或者状态机不在等待状态则返回为错误
+            if (!current_transaction_ ||
+                current_transaction_->state.load(std::memory_order_acquire) != SdoState::WAITING_RESPONSE) {
                 return false;
             }
 
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                now - start_time_).count();//通过将当前时间和事务开始时间相减来判断是否超时
+                now - start_time_).count(); // 通过将当前时间和事务开始时间相减来判断是否超时
 
             if (elapsed >= TIME_OUT_US) {
 
-                //获取重试次数
-                uint8_t current_retry = transaction_ptr->retry_count.load(std::memory_order_acquire);
-                
-                //还有重试机会的情况
+                // 获取重试次数
+                uint8_t current_retry = current_transaction_->retry_count.load(std::memory_order_acquire);
+
+                // 还有重试机会的情况
                 if (current_retry < MAX_RETRY_COUNT) {
                     // 还可以重试，增加计数器并设置重试状态
-                    transaction_ptr->retry_count.fetch_add(1, std::memory_order_acq_rel);
-                    transaction_ptr->state.store(SdoState::RETRYING, std::memory_order_release);
-                    
+                    current_transaction_->retry_count.fetch_add(1, std::memory_order_acq_rel);
+                    current_transaction_->state.store(SdoState::RETRYING, std::memory_order_release);
+
                     // 重置开始时间准备重试
                     start_time_ = std::chrono::steady_clock::now();
-                    
+
+                    #if DEBUG_OUTPUT
                     // 输出重试信息
-                    std::cout << "[WARNING][SDO_State_Machine::checkTimeout]: SDO超时，正在重试 ("
-                              << static_cast<int>(current_retry + 1) << "/" 
-                              << MAX_RETRY_COUNT << "), 节点ID=" 
-                              << static_cast<int>(transaction_ptr->node_id)
-                              << ", 索引=0x" << std::hex << transaction_ptr->index 
+                    std::cout << "[DEBUG][SDO_State_Machine::checkTimeout]: SDO超时，正在重试 ("
+                              << static_cast<int>(current_retry + 1) << "/"
+                              << MAX_RETRY_COUNT << "), 节点ID="
+                              << static_cast<int>(current_transaction_->node_id)
+                              << ", 索引=0x" << std::hex << current_transaction_->index
                               << std::dec << std::endl;
-                    
+#endif
+
                     // 内存栅栏和通知
                     std::atomic_thread_fence(std::memory_order_release);
                     condition_.notify_all();
                     return true;
                 } else {
                     // 超过最大重试次数，设置最终失败状态
-                    transaction_ptr->state.store(SdoState::MAX_RETRIES_EXCEEDED, std::memory_order_release);
-                    
+                    current_transaction_->state.store(SdoState::MAX_RETRIES_EXCEEDED, std::memory_order_release);
+
                     // 按照CLAUDE.md标准输出错误信息
-                    std::cout << "[ERROR][SDO_State_Machine::checkTimeout]: SDO通信失败，已重试" 
-                              << MAX_RETRY_COUNT << "次仍无响应, 节点ID=" 
-                              << static_cast<int>(transaction_ptr->node_id)
-                              << ", 索引=0x" << std::hex << transaction_ptr->index 
-                              << std::dec << ", 子索引=0x" << std::hex 
-                              << static_cast<int>(transaction_ptr->subindex) << std::dec << std::endl;
-                    
+                    std::cout << "[ERROR][SDO_State_Machine::checkTimeout]: SDO通信失败，已重试"
+                              << MAX_RETRY_COUNT << "次仍无响应, 节点ID="
+                              << static_cast<int>(current_transaction_->node_id)
+                              << ", 索引=0x" << std::hex << current_transaction_->index
+                              << std::dec << ", 子索引=0x" << std::hex
+                              << static_cast<int>(current_transaction_->subindex) << std::dec << std::endl;
+
                     // 内存栅栏和通知
                     std::atomic_thread_fence(std::memory_order_release);
                     condition_.notify_all();
-                    
+
                     // 抛出异常
                     throw std::runtime_error("SDO通信超时，超过最大重试次数");
                 }
@@ -605,12 +726,11 @@ namespace canopen {
          */
         inline bool needsRetry() {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            if (!transaction_ptr) return false;
-            
+            if (!current_transaction_) return false;
+
             SdoState expected = SdoState::RETRYING;
             // 尝试将状态从RETRYING转换为WAITING_RESPONSE
-            if (transaction_ptr->state.compare_exchange_strong(expected,
+            if (current_transaction_->state.compare_exchange_strong(expected,
                 SdoState::WAITING_RESPONSE,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire)) {
@@ -618,31 +738,52 @@ namespace canopen {
             }
             return false;
         }
-         
+
         /**
          * @brief 获取当前重试次数
          * @return 重试次数
          */
         uint8_t getRetryCount() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            return transaction_ptr ? 
-                transaction_ptr->retry_count.load(std::memory_order_acquire) : 0;
+            return current_transaction_ ?
+                current_transaction_->retry_count.load(std::memory_order_acquire) : 0;
         }
 
         /**
          * @brief 完成当前事务
-         * 
-         * @details 安全释放当前事务的引用，使状态机返回空闲状态
+         *
+         * @details 安全完成当前事务，使状态机返回空闲状态
          * - 使用互斥锁保证线程安全
-         * - shared_ptr自动管理内存释放
-         * - 释放后状态机可接受新事务
-         * 
+         * - 清除当前事务对象，状态机返回空闲状态
+         * - 完成后状态机可接受新事务
+         *
          * @note 调用后状态机返回空闲状态，可处理新的SDO事务
          */
         inline void completeTransaction() {
             std::lock_guard<std::mutex> lock(mutex_);
-            current_transaction_.reset();  // 使用reset()明确释放引用
+
+#if DEBUG_OUTPUT
+            bool had_transaction = current_transaction_.has_value();
+            if (had_transaction) {
+                std::cout << "[DEBUG][completeTransaction]: 清除事务 - 节点ID: "
+                    << static_cast<int>(current_transaction_->node_id)
+                    << ", 索引: 0x" << std::hex << current_transaction_->index
+                    << std::dec << std::endl;
+            } else {
+                std::cout << "[DEBUG][completeTransaction]: 无事务可清除" << std::endl;
+            }
+
+            if (transaction_protected_) {
+                std::cout << "[WARNING][completeTransaction]: 事务被保护，但仍被清除！" << std::endl;
+                transaction_protected_ = false;
+            }
+#endif
+
+            current_transaction_.reset();  // 清除当前事务对象
+
+#if DEBUG_OUTPUT
+            std::cout << "[DEBUG][completeTransaction]: 事务已清除" << std::endl;
+#endif
         }
 
         /**
@@ -651,10 +792,28 @@ namespace canopen {
          */
         SdoState getCurrentState() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            return transaction_ptr ?
-                transaction_ptr->state.load(std::memory_order_acquire) :
-                SdoState::IDLE;
+            bool transaction_exists = current_transaction_.has_value();
+
+            // 调试信息：检查事务存在性和状态
+            if (transaction_exists) {
+                auto state = current_transaction_->state.load(std::memory_order_acquire);
+
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][getCurrentState]: 事务存在，状态: " << static_cast<int>(state)
+                    << ", 内存地址: " << &(*current_transaction_) << std::endl;
+                std::cout << "[DEBUG][getCurrentState]: 事务详情 - 节点ID: "
+                    << static_cast<int>(current_transaction_->node_id)
+                    << ", 索引: 0x" << std::hex << current_transaction_->index
+                    << std::dec << std::endl;
+#endif
+
+                return state;
+            } else {
+#if DEBUG_OUTPUT
+                std::cout << "[DEBUG][getCurrentState]: 事务不存在，返回IDLE状态" << std::endl;
+#endif
+                return SdoState::IDLE;
+            }
         }
 
         /**
@@ -663,31 +822,29 @@ namespace canopen {
          */
         SdoResponseType getResponseType() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            return transaction_ptr ?
-                transaction_ptr->response_type.load(std::memory_order_acquire) :
+            return current_transaction_ ?
+                current_transaction_->response_type.load(std::memory_order_acquire) :
                 SdoResponseType::NO_RESPONSE;
         }
 
         /**
          * @brief 获取响应数据（线程安全）
          * @return 响应数据（如果存在）
-         * 
+         *
          * @details 线程安全地获取当前事务的响应数据
          * - 使用互斥锁保证数据一致性
          * - 返回安全的数据副本避免并发访问问题
          * - 验证事务存在性后返回数据
-         * 
+         *
          * @note 返回的是数据副本，不会影响原始数据的线程安全性
          * @warning 只有在事务存在时才返回数据，否则返回nullopt
          */
         std::optional<std::array<uint8_t, 8>> getResponseData() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            if (!transaction_ptr) {
+            if (!current_transaction_) {
                 return std::nullopt;
             }
-            return transaction_ptr->response_data;
+            return current_transaction_->response_data;
         }
 
         /**
@@ -696,10 +853,9 @@ namespace canopen {
          */
         bool isBusy() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto transaction_ptr = current_transaction_;
-            if (!transaction_ptr) return false;
-            
-            auto state = transaction_ptr->state.load(std::memory_order_acquire);
+            if (!current_transaction_) return false;
+
+            auto state = current_transaction_->state.load(std::memory_order_acquire);
             return state == SdoState::WAITING_RESPONSE || state == SdoState::RETRYING;
         }
 
@@ -715,7 +871,30 @@ namespace canopen {
          */
         void reset() {
             std::lock_guard<std::mutex> lock(mutex_);
+
+#if DEBUG_OUTPUT
+            bool had_transaction = current_transaction_.has_value();
+            if (had_transaction) {
+                std::cout << "[DEBUG][reset]: 强制重置状态机 - 节点ID: "
+                    << static_cast<int>(current_transaction_->node_id)
+                    << ", 索引: 0x" << std::hex << current_transaction_->index
+                    << std::dec << std::endl;
+            } else {
+                std::cout << "[DEBUG][reset]: 状态机重置（无事务）" << std::endl;
+            }
+
+            if (transaction_protected_) {
+                std::cout << "[WARNING][reset]: 强制重置被保护的事务！" << std::endl;
+                transaction_protected_ = false;
+            }
+#endif
+
             current_transaction_.reset();  // 使用reset()明确释放引用
+            transaction_protected_ = false;  // 确保保护标志也被重置
+
+#if DEBUG_OUTPUT
+            std::cout << "[DEBUG][reset]: 状态机重置完成" << std::endl;
+#endif
         }
 
         // 静态工具函数 - 用于快速SDO帧识别和验证
@@ -806,9 +985,11 @@ namespace canopen {
     private:
         mutable std::mutex mutex_;                      ///< 互斥锁保护共享数据
         std::condition_variable condition_;             ///< 条件变量用于线程同步
-        std::shared_ptr<SdoTransaction> current_transaction_; ///< 当前处理的事务智能指针
+        std::optional<SdoTransaction> current_transaction_; ///< 当前处理的事务对象
         std::chrono::steady_clock::time_point start_time_; ///< 事务开始时间
-    };
+        bool transaction_protected_{false};            ///< 事务保护标志，防止意外清除
+
+            };
 
 } // namespace canopen
 
