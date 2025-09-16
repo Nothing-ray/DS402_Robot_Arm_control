@@ -40,3 +40,9 @@
 /DS402_Robot_Arm_control/DS402_Ro.00540d7d
 **/.claude
 CLAUDE.md
+/doc
+/cmake_build
+/build
+/README_BUILD.md
+/build.bat
+/build_gcc.sh

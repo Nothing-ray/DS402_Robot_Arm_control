@@ -80,7 +80,15 @@
 /// @brief SDO重试机制配置
 #define MAX_RETRY_COUNT 3  // 最大重试次数（2-3次）
 
-#define DEBUG_OUTPUT 1
+#define ENABLE_DEBUG_OUTPUT 0
+
+#if ENABLE_DEBUG_OUTPUT
+#define DEBUG_PRINT(msg) do { std::cout << msg << std::endl; } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { if (cond) { std::cout << msg << std::endl; } } while(0)
+#else
+#define DEBUG_PRINT(msg) do { } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { } while(0)
+#endif
 
 
 
@@ -301,21 +309,20 @@ namespace canopen {
 
             // 参数验证 - 防止空指针
             if (!can_bytes) {
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][prepareTransactionFromBytes]: 输入参数为空指针" << std::endl;
-#endif
+                DEBUG_PRINT("[DEBUG][prepareTransactionFromBytes]: 输入参数为空指针");
                 transaction.state.store(SdoState::IDLE, std::memory_order_release);
                 return transaction;
             }
 
-#if DEBUG_OUTPUT
-            // 调试输出：显示输入字节
-            std::cout << "[DEBUG][prepareTransactionFromBytes]: 输入字节: ";
-            for (int i = 0; i < 13 && i < 8; ++i) {
-                std::cout << std::hex << "0x" << static_cast<int>(can_bytes[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-#endif
+            DEBUG_PRINT("[DEBUG][prepareTransactionFromBytes]: 输入字节: "
+                << std::hex << "0x" << static_cast<int>(can_bytes[0]) << " "
+                << "0x" << static_cast<int>(can_bytes[1]) << " "
+                << "0x" << static_cast<int>(can_bytes[2]) << " "
+                << "0x" << static_cast<int>(can_bytes[3]) << " "
+                << "0x" << static_cast<int>(can_bytes[4]) << " "
+                << "0x" << static_cast<int>(can_bytes[5]) << " "
+                << "0x" << static_cast<int>(can_bytes[6]) << " "
+                << "0x" << static_cast<int>(can_bytes[7]) << std::dec);
 
             // 直接从字节数据提取帧ID（大端序）
             uint32_t frame_id = (static_cast<uint32_t>(can_bytes[1]) << 24) |
@@ -333,16 +340,10 @@ namespace canopen {
             uint32_t frame_type = frame_id & SDO_ID_MASK;
             uint8_t node_id = static_cast<uint8_t>(frame_id & NODE_ID_MASK);
 
-            #if DEBUG_OUTPUT
-            // 验证帧类型、节点ID
-            std::cout << "[DEBUG][prepareTransactionFromBytes]: 帧类型: 0x" << std::hex << frame_type
-                      << ", 期望: 0x" << SDO_REQUEST_ID << ", 节点ID: " << std::dec << static_cast<int>(node_id) << std::endl;
-#endif
+            DEBUG_PRINT_IF(frame_type != SDO_REQUEST_ID || node_id == 0 || node_id > 127,
+                "[DEBUG][prepareTransactionFromBytes]: 帧验证失败，返回IDLE状态");
 
             if (frame_type != SDO_REQUEST_ID || node_id == 0 || node_id > 127) {
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][prepareTransactionFromBytes]: 帧验证失败，返回IDLE状态" << std::endl;
-#endif
                 transaction.state.store(SdoState::IDLE, std::memory_order_release);
                 return transaction;
             }
@@ -359,18 +360,14 @@ namespace canopen {
                 transaction.index = (static_cast<uint16_t>(can_bytes[6]) << 8) | can_bytes[5];
                 transaction.subindex = can_bytes[7];
 
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][prepareTransactionFromBytes]: 解析成功 - 索引: 0x" << std::hex << transaction.index
-                          << ", 子索引: 0x" << static_cast<int>(transaction.subindex) << std::dec << std::endl;
-#endif
+                DEBUG_PRINT("[DEBUG][prepareTransactionFromBytes]: 解析成功 - 索引: 0x"
+                    << std::hex << transaction.index << ", 子索引: 0x" << static_cast<int>(transaction.subindex) << std::dec);
             } else {
                 // 数据长度不足，设置默认值
                 transaction.index = 0;
                 transaction.subindex = 0;
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][prepareTransactionFromBytes]: 数据长度不足 (DLC=" << static_cast<int>(dlc)
-                          << "), 使用默认值" << std::endl;
-#endif
+                DEBUG_PRINT("[DEBUG][prepareTransactionFromBytes]: 数据长度不足 (DLC="
+                    << static_cast<int>(dlc) << "), 使用默认值");
             }
 
             // 安全复制请求数据 - 防止缓冲区溢出
@@ -391,10 +388,8 @@ namespace canopen {
 
             transaction.state.store(SdoState::IDLE, std::memory_order_release);
 
-#if DEBUG_OUTPUT
-            std::cout << "[DEBUG][prepareTransactionFromBytes]: 事务准备完成，节点ID: " << static_cast<int>(transaction.node_id)
-                      << ", 索引: 0x" << std::hex << transaction.index << std::dec << std::endl;
-#endif
+            DEBUG_PRINT("[DEBUG][prepareTransactionFromBytes]: 事务准备完成，节点ID: "
+                << static_cast<int>(transaction.node_id) << ", 索引: 0x" << std::hex << transaction.index << std::dec);
 
             return transaction;
         }
@@ -464,16 +459,17 @@ namespace canopen {
             // 设置事务保护标志，防止意外清除
             transaction_protected_ = true;
 
-#if DEBUG_OUTPUT
-            std::cout << "[DEBUG][createAndStartTransaction]: 事务创建并启动成功" << std::endl;
-            std::cout << "[DEBUG][createAndStartTransaction]: 节点ID: " << static_cast<int>(node_id)
-                << ", 索引: 0x" << std::hex << index << std::dec << std::endl;
-            std::cout << "[DEBUG][createAndStartTransaction]: 事务存在性: " << (transaction_exists ? "是" : "否") << std::endl;
-            std::cout << "[DEBUG][createAndStartTransaction]: 验证状态: " << static_cast<int>(verify_state)
-                << " (期望: " << static_cast<int>(SdoState::WAITING_RESPONSE) << ")" << std::endl;
-            std::cout << "[DEBUG][createAndStartTransaction]: 内存地址: " << &(*current_transaction_) << std::endl;
-            std::cout << "[DEBUG][createAndStartTransaction]: 保护标志已设置" << std::endl;
-#endif // DEBUG_OUTPUT
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 事务创建并启动成功");
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 节点ID: " << static_cast<int>(node_id)
+                << ", 索引: 0x" << std::hex << index << std::dec);
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 事务存在性: "
+                << (transaction_exists ? "是" : "否"));
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 验证状态: "
+                << static_cast<int>(verify_state) << " (期望: "
+                << static_cast<int>(SdoState::WAITING_RESPONSE) << ")");
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 内存地址: "
+                << &(*current_transaction_));
+            DEBUG_PRINT("[DEBUG][createAndStartTransaction]: 保护标志已设置");
 
             
 
@@ -560,6 +556,17 @@ namespace canopen {
                 return false;
             }
 
+            // 安全获取命令字节 - 验证数据有效性
+            uint8_t command = (dlc > 0) ? response_data[0] : 0;
+            SdoResponseType response_type = classifyResponse(command);
+
+            // 验证响应数据长度是否符合响应类型要求
+            if (!validateResponseDataLength(response_type, dlc)) {
+                DEBUG_PRINT("[DEBUG][processResponse]: 响应数据长度验证失败 - 命令: 0x"
+                    << std::hex << static_cast<int>(command) << ", DLC: " << std::dec << static_cast<int>(dlc));
+                return false;
+            }
+
             // 安全复制响应数据 - 防止缓冲区溢出
             const size_t copy_size = std::min({
                 static_cast<size_t>(dlc),
@@ -576,10 +583,6 @@ namespace canopen {
             }
 
             current_transaction_->response_dlc = dlc;
-
-            // 安全获取命令字节 - 验证数据有效性
-            uint8_t command = (dlc > 0) ? response_data[0] : 0;
-            SdoResponseType response_type = classifyResponse(command);
 
             // 原子更新响应类型和状态
             current_transaction_->response_type.store(response_type, std::memory_order_release);
@@ -676,15 +679,10 @@ namespace canopen {
                     // 重置开始时间准备重试
                     start_time_ = std::chrono::steady_clock::now();
 
-                    #if DEBUG_OUTPUT
-                    // 输出重试信息
-                    std::cout << "[DEBUG][SDO_State_Machine::checkTimeout]: SDO超时，正在重试 ("
-                              << static_cast<int>(current_retry + 1) << "/"
-                              << MAX_RETRY_COUNT << "), 节点ID="
-                              << static_cast<int>(current_transaction_->node_id)
-                              << ", 索引=0x" << std::hex << current_transaction_->index
-                              << std::dec << std::endl;
-#endif
+                    DEBUG_PRINT("[DEBUG][SDO_State_Machine::checkTimeout]: SDO超时，正在重试 ("
+                        << static_cast<int>(current_retry + 1) << "/" << MAX_RETRY_COUNT << "), 节点ID="
+                        << static_cast<int>(current_transaction_->node_id)
+                        << ", 索引=0x" << std::hex << current_transaction_->index << std::dec);
 
                     // 内存栅栏和通知
                     std::atomic_thread_fence(std::memory_order_release);
@@ -762,28 +760,21 @@ namespace canopen {
         inline void completeTransaction() {
             std::lock_guard<std::mutex> lock(mutex_);
 
-#if DEBUG_OUTPUT
-            bool had_transaction = current_transaction_.has_value();
-            if (had_transaction) {
-                std::cout << "[DEBUG][completeTransaction]: 清除事务 - 节点ID: "
-                    << static_cast<int>(current_transaction_->node_id)
-                    << ", 索引: 0x" << std::hex << current_transaction_->index
-                    << std::dec << std::endl;
-            } else {
-                std::cout << "[DEBUG][completeTransaction]: 无事务可清除" << std::endl;
-            }
+            DEBUG_PRINT_IF(had_transaction,
+                "[DEBUG][completeTransaction]: 清除事务 - 节点ID: "
+                << static_cast<int>(current_transaction_->node_id)
+                << ", 索引: 0x" << std::hex << current_transaction_->index << std::dec);
+            DEBUG_PRINT_IF(!had_transaction,
+                "[DEBUG][completeTransaction]: 无事务可清除");
 
             if (transaction_protected_) {
-                std::cout << "[WARNING][completeTransaction]: 事务被保护，但仍被清除！" << std::endl;
+                DEBUG_PRINT("[WARNING][completeTransaction]: 事务被保护，但仍被清除！");
                 transaction_protected_ = false;
             }
-#endif
 
             current_transaction_.reset();  // 清除当前事务对象
 
-#if DEBUG_OUTPUT
-            std::cout << "[DEBUG][completeTransaction]: 事务已清除" << std::endl;
-#endif
+            DEBUG_PRINT("[DEBUG][completeTransaction]: 事务已清除");
         }
 
         /**
@@ -798,20 +789,15 @@ namespace canopen {
             if (transaction_exists) {
                 auto state = current_transaction_->state.load(std::memory_order_acquire);
 
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][getCurrentState]: 事务存在，状态: " << static_cast<int>(state)
-                    << ", 内存地址: " << &(*current_transaction_) << std::endl;
-                std::cout << "[DEBUG][getCurrentState]: 事务详情 - 节点ID: "
+                DEBUG_PRINT("[DEBUG][getCurrentState]: 事务存在，状态: " << static_cast<int>(state)
+                    << ", 内存地址: " << &(*current_transaction_));
+                DEBUG_PRINT("[DEBUG][getCurrentState]: 事务详情 - 节点ID: "
                     << static_cast<int>(current_transaction_->node_id)
-                    << ", 索引: 0x" << std::hex << current_transaction_->index
-                    << std::dec << std::endl;
-#endif
+                    << ", 索引: 0x" << std::hex << current_transaction_->index << std::dec);
 
                 return state;
             } else {
-#if DEBUG_OUTPUT
-                std::cout << "[DEBUG][getCurrentState]: 事务不存在，返回IDLE状态" << std::endl;
-#endif
+                DEBUG_PRINT("[DEBUG][getCurrentState]: 事务不存在，返回IDLE状态");
                 return SdoState::IDLE;
             }
         }
@@ -872,29 +858,22 @@ namespace canopen {
         void reset() {
             std::lock_guard<std::mutex> lock(mutex_);
 
-#if DEBUG_OUTPUT
-            bool had_transaction = current_transaction_.has_value();
-            if (had_transaction) {
-                std::cout << "[DEBUG][reset]: 强制重置状态机 - 节点ID: "
-                    << static_cast<int>(current_transaction_->node_id)
-                    << ", 索引: 0x" << std::hex << current_transaction_->index
-                    << std::dec << std::endl;
-            } else {
-                std::cout << "[DEBUG][reset]: 状态机重置（无事务）" << std::endl;
-            }
+            DEBUG_PRINT_IF(had_transaction,
+                "[DEBUG][reset]: 强制重置状态机 - 节点ID: "
+                << static_cast<int>(current_transaction_->node_id)
+                << ", 索引: 0x" << std::hex << current_transaction_->index << std::dec);
+            DEBUG_PRINT_IF(!had_transaction,
+                "[DEBUG][reset]: 状态机重置（无事务）");
 
             if (transaction_protected_) {
-                std::cout << "[WARNING][reset]: 强制重置被保护的事务！" << std::endl;
+                DEBUG_PRINT("[WARNING][reset]: 强制重置被保护的事务！");
                 transaction_protected_ = false;
             }
-#endif
 
             current_transaction_.reset();  // 使用reset()明确释放引用
             transaction_protected_ = false;  // 确保保护标志也被重置
 
-#if DEBUG_OUTPUT
-            std::cout << "[DEBUG][reset]: 状态机重置完成" << std::endl;
-#endif
+            DEBUG_PRINT("[DEBUG][reset]: 状态机重置完成");
         }
 
         // 静态工具函数 - 用于快速SDO帧识别和验证
@@ -979,6 +958,41 @@ namespace canopen {
             case 0x43: return SdoResponseType::READ_32BIT;  // 快速上传 4字节
             case 0x60: return SdoResponseType::WRITE_SUCCESS; // 快速下载成功
             default:   return SdoResponseType::UNKNOWN;     // 未知或不支持的命令
+            }
+        }
+
+        /**
+         * @brief 验证响应数据长度是否符合CANopen协议要求
+         * @param response_type 响应类型
+         * @param dlc 数据长度
+         * @return 是否验证通过
+         *
+         * @details 根据CANopen SDO协议验证响应数据长度
+         * - 错误响应: 至少4字节（命令+错误码）
+         * - 读8位响应: 至少5字节（命令+索引+子索引+4字节数据）
+         * - 读16位响应: 至少6字节（命令+索引+子索引+2字节数据）
+         * - 读32位响应: 至少8字节（命令+索引+子索引+4字节数据）
+         * - 写成功响应: 至少4字节（命令+索引+子索引）
+         *
+         * @note 这是CANopen协议的基本要求，确保响应数据完整性
+         * @note 在13字节CAN帧格式中，DLC反映实际有效数据长度
+         */
+        inline bool validateResponseDataLength(SdoResponseType response_type, uint8_t dlc) const {
+            switch (response_type) {
+                case SdoResponseType::READ_8BIT:
+                    return dlc >= 5;  // 命令+索引+子索引+4字节数据
+                case SdoResponseType::READ_16BIT:
+                    return dlc >= 6;  // 命令+索引+子索引+2字节数据
+                case SdoResponseType::READ_32BIT:
+                    return dlc >= 8;  // 命令+索引+子索引+4字节数据
+                case SdoResponseType::WRITE_SUCCESS:
+                    return dlc >= 4;  // 命令+索引+子索引
+                case SdoResponseType::ERROR_RESPONSE:
+                    return dlc >= 4;  // 命令+错误码
+                case SdoResponseType::UNKNOWN:
+                case SdoResponseType::NO_RESPONSE:
+                default:
+                    return false;   // 未知或无效响应类型
             }
         }
 

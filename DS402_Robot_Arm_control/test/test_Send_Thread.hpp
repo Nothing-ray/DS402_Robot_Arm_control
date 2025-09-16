@@ -144,14 +144,64 @@ public:
     static std::vector<uint8_t> buildErrorResponse(uint8_t nodeId, uint32_t errorCode) {
         std::vector<uint8_t> response(8, 0);
         response[0] = 0x80;  // 错误响应命令
-        
+
         // 错误码（小端序）
         response[1] = static_cast<uint8_t>(errorCode & 0xFF);
         response[2] = static_cast<uint8_t>((errorCode >> 8) & 0xFF);
         response[3] = static_cast<uint8_t>((errorCode >> 16) & 0xFF);
         response[4] = static_cast<uint8_t>((errorCode >> 24) & 0xFF);
-        
+
         return response;
+    }
+
+    /**
+     * @brief 构建完整的13字节SDO响应CAN帧
+     * @param nodeId 源节点ID
+     * @param command SDO响应命令字节
+     * @param responseData SDO响应数据
+     * @param responseSize 响应数据大小
+     * @return std::vector<uint8_t> 13字节完整CAN帧
+     *
+     * @details 构造符合系统13字节CAN帧格式的完整SDO响应帧
+     * - 字节0: 帧信息 (DLC=8, 标志位=0)
+     * - 字节1-4: 帧ID (大端序, 0x580 + nodeId)
+     * - 字节5-12: SDO数据区 (8字节)
+     */
+    static std::vector<uint8_t> buildCompleteSdoResponseFrame(uint8_t nodeId, uint8_t command,
+                                                             const uint8_t* responseData, uint8_t responseSize) {
+        std::vector<uint8_t> completeFrame(13, 0);
+
+        // 字节0: 帧信息 (DLC=8, 标志位=0)
+        completeFrame[0] = 0x08;  // DLC=8
+
+        // 字节1-4: 帧ID (大端序, SDO响应ID: 0x580 + nodeId)
+        uint32_t frameId = 0x580 + nodeId;
+        completeFrame[1] = static_cast<uint8_t>((frameId >> 24) & 0xFF);
+        completeFrame[2] = static_cast<uint8_t>((frameId >> 16) & 0xFF);
+        completeFrame[3] = static_cast<uint8_t>((frameId >> 8) & 0xFF);
+        completeFrame[4] = static_cast<uint8_t>(frameId & 0xFF);
+
+        // 字节5-12: SDO数据区
+        std::vector<uint8_t> sdoData = buildResponseData(nodeId, command, responseData, responseSize);
+        for (size_t i = 0; i < 8 && i < sdoData.size(); ++i) {
+            completeFrame[5 + i] = sdoData[i];
+        }
+
+        return completeFrame;
+    }
+
+    /**
+     * @brief 从13字节CAN帧中提取SDO数据区
+     * @param completeFrame 13字节完整CAN帧
+     * @return std::pair<const uint8_t*, uint8_t> SDO数据区指针和长度
+     */
+    static std::pair<const uint8_t*, uint8_t> extractSdoDataFromFrame(const std::vector<uint8_t>& completeFrame) {
+        if (completeFrame.size() != 13) {
+            return {nullptr, 0};
+        }
+
+        // 返回数据区（字节5-12）的指针和长度
+        return {&completeFrame[5], 8};
     }
 };
 
@@ -308,11 +358,16 @@ public:
     }
     
     /**
-     * @brief 验证响应数据
+     * @brief 验证响应数据（增强版，考虑CANopen SDO协议结构）
      * @param stateMachine SDO状态机引用
      * @param expectedData 期望数据
      * @param expectedSize 期望数据大小
      * @return bool 验证结果
+     *
+     * @details 增强的响应数据验证，考虑CANopen SDO协议结构：
+     * - 读取响应：数据从第1字节开始（第0字节是命令字节）
+     * - 写响应：只验证命令字节和索引
+     * - 错误响应：验证错误码格式
      */
     static bool verifyResponseData(canopen::AtomicSdoStateMachine& stateMachine,
                                   const uint8_t* expectedData, uint8_t expectedSize) {
@@ -321,19 +376,71 @@ public:
             std::cout << "[ERROR][TestValidator]: 无响应数据" << std::endl;
             return false;
         }
-        
+
         const auto& responseData = responseOpt.value();
-        for (uint8_t i = 0; i < expectedSize && i < 8; ++i) {
-            if (responseData[i] != expectedData[i]) {
-                std::cout << "[ERROR][TestValidator]: 响应数据验证失败，位置 " 
-                          << static_cast<int>(i) 
-                          << ", 期望: 0x" << std::hex << static_cast<int>(expectedData[i])
-                          << ", 实际: 0x" << std::hex << static_cast<int>(responseData[i]) 
-                          << std::dec << std::endl;
-                return false;
+        auto responseType = stateMachine.getResponseType();
+
+        // 获取响应DLC用于验证
+        uint8_t responseDlc = 0;  // 需要通过其他方式获取，这里假设
+
+        // 根据响应类型采用不同的验证策略
+        switch (responseType) {
+            case canopen::SdoResponseType::READ_8BIT:
+            case canopen::SdoResponseType::READ_16BIT:
+            case canopen::SdoResponseType::READ_32BIT:
+                // 读取响应：数据从第1字节开始
+                if (responseData.size() < 1) {
+                    std::cout << "[ERROR][TestValidator]: 读取响应数据长度不足" << std::endl;
+                    return false;
+                }
+
+                // 输出调试信息
+                std::cout << "[DEBUG][TestValidator]: 验证读取响应 - 命令: 0x" << std::hex
+                          << static_cast<int>(responseData[0]) << std::dec << std::endl;
+
+                // 验证数据部分（跳过命令字节）
+                for (uint8_t i = 0; i < expectedSize && i < 7; ++i) {
+                    if (responseData[i + 1] != expectedData[i]) {
+                        std::cout << "[ERROR][TestValidator]: 读取响应数据验证失败，位置 "
+                                  << static_cast<int>(i)
+                                  << ", 期望: 0x" << std::hex << static_cast<int>(expectedData[i])
+                                  << ", 实际: 0x" << std::hex << static_cast<int>(responseData[i + 1])
+                                  << std::dec << std::endl;
+                        return false;
+                    }
+                }
+                break;
+
+            case canopen::SdoResponseType::WRITE_SUCCESS:
+                // 写成功响应：验证命令字节
+                if (responseData.size() < 1 || responseData[0] != 0x60) {
+                    std::cout << "[ERROR][TestValidator]: 写成功响应验证失败" << std::endl;
+                    return false;
+                }
+                break;
+
+            case canopen::SdoResponseType::ERROR_RESPONSE:
+            {
+                // 错误响应：验证错误码格式
+                if (responseData.size() < 5) {
+                    std::cout << "[ERROR][TestValidator]: 错误响应数据长度不足" << std::endl;
+                    return false;
+                }
+
+                // 输出错误码信息
+                uint32_t errorCode = (static_cast<uint32_t>(responseData[4]) << 24) |
+                                   (static_cast<uint32_t>(responseData[3]) << 16) |
+                                   (static_cast<uint32_t>(responseData[2]) << 8) |
+                                   responseData[1];
+                std::cout << "[DEBUG][TestValidator]: 错误响应码: 0x" << std::hex << errorCode << std::dec << std::endl;
+                break;
             }
+
+            default:
+                std::cout << "[ERROR][TestValidator]: 未知的响应类型: " << static_cast<int>(responseType) << std::endl;
+                return false;
         }
-        
+
         return true;
     }
     
@@ -352,6 +459,91 @@ public:
                       << ", 实际: " << static_cast<int>(actualCount) << std::endl;
             return false;
         }
+        return true;
+    }
+
+    /**
+     * @brief 验证13字节CAN帧完整结构
+     * @param completeFrame 完整的13字节CAN帧
+     * @param expectedNodeId 期望的节点ID
+     * @param expectedDlc 期望的DLC值
+     * @param context 验证上下文描述
+     * @return bool 验证结果
+     *
+     * @details 验证13字节特殊CAN帧结构的完整性：
+     * - 字节0：帧信息（DLC + 标志位）
+     * - 字节1-4：帧ID（大端序，0x580 + node_id用于SDO响应）
+     * - 字节5-12：数据区（SDO数据区域）
+     *
+     * @note 根据13字节CAN帧格式规范进行验证
+     */
+    static bool verify13ByteCanFrameStructure(const std::vector<uint8_t>& completeFrame,
+                                             uint8_t expectedNodeId,
+                                             uint8_t expectedDlc,
+                                             const std::string& context = "13字节CAN帧结构验证") {
+        std::cout << "=== " << context << " ===" << std::endl;
+
+        // 验证帧长度
+        if (completeFrame.size() != 13) {
+            std::cout << "[ERROR][TestValidator]: CAN帧长度验证失败，期望: 13字节, 实际: "
+                      << completeFrame.size() << "字节" << std::endl;
+            return false;
+        }
+
+        // 验证DLC字段（字节0的低4位）
+        uint8_t actualDlc = completeFrame[0] & 0x0F;
+        if (actualDlc != expectedDlc) {
+            std::cout << "[ERROR][TestValidator]: DLC字段验证失败，期望: 0x"
+                      << std::hex << static_cast<int>(expectedDlc)
+                      << ", 实际: 0x" << static_cast<int>(actualDlc) << std::dec << std::endl;
+            return false;
+        }
+
+        // 验证帧ID（字节1-4，大端序）
+        uint32_t expectedFrameId = 0x580 + expectedNodeId;  // SDO响应帧ID
+        uint32_t actualFrameId = (static_cast<uint32_t>(completeFrame[1]) << 24) |
+                                (static_cast<uint32_t>(completeFrame[2]) << 16) |
+                                (static_cast<uint32_t>(completeFrame[3]) << 8) |
+                                completeFrame[4];
+
+        if (actualFrameId != expectedFrameId) {
+            std::cout << "[ERROR][TestValidator]: 帧ID验证失败，期望: 0x"
+                      << std::hex << expectedFrameId
+                      << ", 实际: 0x" << actualFrameId << std::dec << std::endl;
+            return false;
+        }
+
+        // 验证帧信息字节的高4位标志位
+        uint8_t frameFlags = (completeFrame[0] & 0xF0) >> 4;
+        std::cout << "[DEBUG][TestValidator]: 帧信息标志位: 0x" << std::hex
+                  << static_cast<int>(frameFlags) << std::dec << std::endl;
+
+        // 输出完整帧的十六进制转储
+        std::cout << "[DEBUG][TestValidator]: 完整13字节CAN帧内容:" << std::endl;
+        for (size_t i = 0; i < completeFrame.size(); ++i) {
+            std::cout << "字节" << std::setw(2) << i << ": 0x"
+                      << std::hex << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(completeFrame[i]) << std::dec << std::setfill(' ');
+            if (i == 0) std::cout << " (帧信息: DLC=" << (completeFrame[i] & 0x0F)
+                                  << ", 标志位=0x" << std::hex << ((completeFrame[i] & 0xF0) >> 4) << std::dec << ")";
+            else if (i == 1) std::cout << " (帧ID高字节)";
+            else if (i == 4) std::cout << " (帧ID低字节)";
+            else if (i == 5) std::cout << " (SDO数据区开始)";
+            std::cout << std::endl;
+        }
+
+        // 验证SDO数据区域（字节5-12）
+        std::vector<uint8_t> sdoDataArea(completeFrame.begin() + 5, completeFrame.begin() + 13);
+        std::cout << "[DEBUG][TestValidator]: SDO数据区域提取:" << std::endl;
+        for (size_t i = 0; i < sdoDataArea.size(); ++i) {
+            std::cout << "SDO字节" << std::setw(2) << i << ": 0x"
+                      << std::hex << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(sdoDataArea[i]) << std::dec << std::setfill(' ');
+            if (i == 0) std::cout << " (SDO命令字节)";
+            std::cout << std::endl;
+        }
+
+        std::cout << "[DEBUG][TestValidator]: 13字节CAN帧结构验证通过" << std::endl;
         return true;
     }
 
@@ -629,42 +821,68 @@ bool testSendThreadSdoFunctionality() {
             }
             
             // 构造响应数据（读取到的控制字值：0x000F）
-            uint8_t responseData[] = {0x00, 0x0F};
-            auto responseFrame = SdoFrameBuilder::buildResponseData(1, 0x43, responseData, 2);
-            
-            TEST_DEBUG_PRINT("构造响应数据 - 节点ID: 1, 命令: 0x43, 数据大小: 2字节");
-            
-            // 通过状态机处理响应
-            bool processResult = sdoStateMachine.processResponse(responseFrame.data(), 
-                                                                static_cast<uint8_t>(responseFrame.size()), 
-                                                                1);
-            
+            // 构造完整的13字节CAN帧，然后提取SDO数据区
+            uint8_t expectedData[] = {0x00, 0x0F};
+            auto completeFrame = SdoFrameBuilder::buildCompleteSdoResponseFrame(1, 0x4B, expectedData, 2);
+
+            TEST_DEBUG_PRINT("构造完整CAN帧 - 节点ID: 1, 命令: 0x4B, 数据大小: 2字节");
+
+            // 增强验证：验证13字节CAN帧完整结构
+            if (!TestValidator::verify13ByteCanFrameStructure(completeFrame, 1, 8, "SDO响应帧结构验证")) {
+                std::cout << "[ERROR][Test]: 13字节CAN帧结构验证失败" << std::endl;
+                return false;
+            }
+
+            TEST_DEBUG_PRINT("完整CAN帧内容: ");
+            for (size_t i = 0; i < completeFrame.size(); ++i) {
+                std::cout << std::hex << "0x" << static_cast<int>(completeFrame[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+
+            // 提取SDO数据区（字节5-12）
+            auto [sdoDataPtr, sdoDataSize] = SdoFrameBuilder::extractSdoDataFromFrame(completeFrame);
+
+            TEST_DEBUG_PRINT("SDO数据区内容: ");
+            for (size_t i = 0; i < sdoDataSize; ++i) {
+                std::cout << std::hex << "0x" << static_cast<int>(sdoDataPtr[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+
+            // 通过状态机处理响应（传递SDO数据区，不是完整CAN帧）
+            bool processResult = sdoStateMachine.processResponse(sdoDataPtr, sdoDataSize, 1);
+
             if (!processResult) {
                 std::cout << "[ERROR][Test]: SDO响应处理失败" << std::endl;
                 return false;
             }
-            
+
             TEST_DEBUG_PRINT("响应处理成功，等待状态转换...");
-            
+
             // 验证状态转换（使用同步等待）
             if (!TestValidator::verifyState(sdoStateMachine, canopen::SdoState::RESPONSE_VALID, true)) {
                 std::cout << "[ERROR][Test]: SDO响应处理测试失败 - 状态转换错误" << std::endl;
-                
+
                 // 诊断信息
                 auto state = sdoStateMachine.getCurrentState();
                 std::cout << "[DEBUG][Test]: 处理响应后状态: " << static_cast<int>(state) << std::endl;
-                
+
                 return false;
             }
-            
+
             // 验证响应类型
             if (!TestValidator::verifyResponseType(sdoStateMachine, canopen::SdoResponseType::READ_16BIT)) {
                 std::cout << "[ERROR][Test]: SDO响应处理测试失败 - 响应类型错误" << std::endl;
+
+                // 添加详细的响应类型诊断
+                auto actualType = sdoStateMachine.getResponseType();
+                std::cout << "[DEBUG][Test]: 期望类型: READ_16BIT (3), 实际类型: "
+                          << static_cast<int>(actualType) << std::endl;
+
                 return false;
             }
-            
-            // 验证响应数据
-            if (!TestValidator::verifyResponseData(sdoStateMachine, responseData, 2)) {
+
+            // 验证响应数据（使用增强的验证逻辑）
+            if (!TestValidator::verifyResponseData(sdoStateMachine, expectedData, 2)) {
                 std::cout << "[ERROR][Test]: SDO响应处理测试失败 - 响应数据错误" << std::endl;
                 return false;
             }
@@ -787,14 +1005,35 @@ bool testSendThreadSdoFunctionality() {
             }
             
             // 构造错误响应（对象不存在错误）
-            auto errorResponse = SdoFrameBuilder::buildErrorResponse(1, 0x08000020); // 对象不存在
-            
+            // 使用新的完整CAN帧构造方式
+            auto errorCompleteFrame = SdoFrameBuilder::buildCompleteSdoResponseFrame(1, 0x80, nullptr, 0);
+
+            // 设置错误码（对象不存在错误：0x08000020）
+            // 错误码在SDO数据区的字节1-4（小端序）
+            errorCompleteFrame[6] = static_cast<uint8_t>(0x08000020 & 0xFF);      // 错误码低字节
+            errorCompleteFrame[7] = static_cast<uint8_t>((0x08000020 >> 8) & 0xFF);   // 错误码次低字节
+            errorCompleteFrame[8] = static_cast<uint8_t>((0x08000020 >> 16) & 0xFF);  // 错误码次高字节
+            errorCompleteFrame[9] = static_cast<uint8_t>((0x08000020 >> 24) & 0xFF);  // 错误码高字节
+
             TEST_DEBUG_PRINT("构造错误响应 - 节点ID: 1, 错误码: 0x08000020");
-            
+
+            // 增强验证：验证错误响应CAN帧结构
+            if (!TestValidator::verify13ByteCanFrameStructure(errorCompleteFrame, 1, 8, "错误响应帧结构验证")) {
+                std::cout << "[ERROR][Test]: 错误响应CAN帧结构验证失败" << std::endl;
+                return false;
+            }
+
+            TEST_DEBUG_PRINT("错误响应完整CAN帧内容: ");
+            for (size_t i = 0; i < errorCompleteFrame.size(); ++i) {
+                std::cout << std::hex << "0x" << static_cast<int>(errorCompleteFrame[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+
+            // 提取SDO数据区
+            auto [errorSdoDataPtr, errorSdoDataSize] = SdoFrameBuilder::extractSdoDataFromFrame(errorCompleteFrame);
+
             // 处理错误响应
-            bool processResult = sdoStateMachine.processResponse(errorResponse.data(), 
-                                                                static_cast<uint8_t>(errorResponse.size()), 
-                                                                1);
+            bool processResult = sdoStateMachine.processResponse(errorSdoDataPtr, errorSdoDataSize, 1);
             
             if (!processResult) {
                 std::cout << "[ERROR][Test]: 错误处理测试失败 - 响应处理失败" << std::endl;

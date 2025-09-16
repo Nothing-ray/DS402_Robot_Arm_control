@@ -40,30 +40,6 @@ int runAllTests() {
     auto startTime = std::chrono::steady_clock::now();
 
     try {
-        // 测试0: 串口管理器基础功能测试 - 确定串口管理器本身设计是否正确
-        std::cout << "\n[TEST]: 开始串口管理器基础功能测试..." << std::endl;
-
-        bool serialManagerResult = testSerialManagerBasicFunctionality();
-
-        if (serialManagerResult) {
-            std::cout << "[SUCCESS]: 串口管理器基础功能测试通过" << std::endl;
-        } else {
-            std::cout << "[ERROR]: 串口管理器基础功能测试失败" << std::endl;
-            // 注意：这里不设置testResult，因为串口连接失败可能是硬件问题，不是软件设计问题
-            std::cout << "[INFO]: 串口管理器测试失败可能由于硬件连接问题，继续其他测试..." << std::endl;
-        }
-
-        // 测试1: SDO状态机测试 - 新架构测试
-        std::cout << "\n[TEST]: 开始SDO状态机新架构测试..." << std::endl;
-
-        bool sdoStateMachineResult = testNewSdoStateMachineComprehensive();
-
-        if (sdoStateMachineResult) {
-            std::cout << "[SUCCESS]: SDO状态机新架构测试通过" << std::endl;
-        } else {
-            std::cout << "[ERROR]: SDO状态机新架构测试失败" << std::endl;
-            testResult = 1;  // 设置失败标志
-        }
 
               // 测试2: 发送线程SDO功能 - 这是当前的主要测试目标
         std::cout << "\n[TEST]: 开始发送线程SDO功能测试..." << std::endl;

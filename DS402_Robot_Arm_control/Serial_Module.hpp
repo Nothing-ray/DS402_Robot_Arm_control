@@ -47,9 +47,16 @@
  * @{
  */
 
-/// 调试输出控制
-#ifndef DISABLE_SERIAL_DEBUG
-//#define ENABLE_SERIAL_DEBUG
+// 调试输出开关（修改后面的0）
+#define ENABLE_DEBUG_OUTPUT 0
+
+// 调试输出控制（零开销宏）
+#if ENABLE_DEBUG_OUTPUT
+#define DEBUG_PRINT(msg) do { std::cout << msg << std::endl; } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { if (cond) { std::cout << msg << std::endl; } } while(0)
+#else
+#define DEBUG_PRINT(msg) do { } while(0)
+#define DEBUG_PRINT_IF(cond, msg) do { } while(0)
 #endif
 
 
@@ -167,18 +174,14 @@ private:
             serialPort_->set_option(boost::asio::serial_port_base::baud_rate(baudRate_));
             
             connected_.store(true, std::memory_order_release);
-            
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[INFO][SerialPortManager]: 串口连接成功 - " 
-                      << portName_ << " @ " << baudRate_ << " baud" << std::endl;
-#endif
+
+            DEBUG_PRINT("[INFO][SerialPortManager]: 串口连接成功 - "
+                      << portName_ << " @ " << baudRate_ << " baud");
             return true;
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::connectInternal]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::connectInternal]: " << e.what());
             return false;
         }
     }
@@ -194,15 +197,11 @@ private:
                 serialPort_->close();
             }
             connected_.store(false, std::memory_order_release);
-            
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cout << "[INFO][SerialPortManager]: 串口已断开" << std::endl;
-#endif
+
+            DEBUG_PRINT("[INFO][SerialPortManager]: 串口已断开");
         }
         catch (const std::exception& e) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::disconnectInternal]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::disconnectInternal]: " << e.what());
         }
     }
     
@@ -281,9 +280,7 @@ public:
      */
     bool sendFrame(const CanFrame& frame) {
         if (!isConnected()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::sendFrame]: 串口未连接" << std::endl;
-#endif
+            DEBUG_PRINT("[WARN][SerialPortManager::sendFrame]: 串口未连接");
             return false;
         }
         
@@ -298,48 +295,38 @@ public:
                 throw std::runtime_error("CAN帧长度错误：预期13字节，实际" + 
                                        std::to_string(binaryData.size()) + "字节");
             }
-#ifdef ENABLE_SERIAL_DEBUG
-            // 开始计时（纳秒精度）
+// 开始计时（纳秒精度）
             auto startTime = std::chrono::high_resolution_clock::now();
-            
-#endif
 
             {
-
                 std::lock_guard<std::mutex> lock(sendMutex_);
-
-                //发送数据
                 boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
-
-
             }
 
-#ifdef ENABLE_SERIAL_DEBUG
             // 结束计时并计算耗时（纳秒转换为微秒）
             auto endTime = std::chrono::high_resolution_clock::now();
             auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
             double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
-            
 
-            std::cout << "[DEBUG][SerialPortManager]: CAN帧发送成功. 字节: ";
+            // 输出发送的帧内容
+            std::ostringstream frameStream;
+            frameStream << "[DEBUG][SerialPortManager]: CAN帧发送成功. 字节: ";
             for (uint8_t byte : binaryData) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                          << static_cast<int>(byte) << " ";
+                frameStream << std::hex << std::setw(2) << std::setfill('0')
+                           << static_cast<int>(byte) << " ";
             }
-            std::cout << std::dec << std::endl;
-            
+            frameStream << std::dec;
+            DEBUG_PRINT(frameStream.str());
+
             // 输出发送耗时统计
-            std::cout << "[PERF][SerialPortManager::sendFrame]: "
-                      << "同步发送耗时: " << std::fixed << std::setprecision(2) 
-                      << elapsedTimeUs << " us" << std::endl;
-#endif
+            DEBUG_PRINT("[PERF][SerialPortManager::sendFrame]: "
+                      << "同步发送耗时: " << std::fixed << std::setprecision(2)
+                      << elapsedTimeUs << " us");
             return true;
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendFrame]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::sendFrame]: " << e.what());
             return false;
         }
     }
@@ -367,19 +354,15 @@ public:
         
         // 确保缓冲区足够大
         if (totalBytesToCopy > sendBuffer_.size()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
-                      << "批量帧数过多，超过预分配缓冲区大小" << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::sendFramesBatch]: "
+                      << "批量帧数过多，超过预分配缓冲区大小");
             return 0;
         }
         
-#ifdef ENABLE_SERIAL_DEBUG
-        // 开始计时（纳秒精度）
+// 开始计时（纳秒精度）
         auto startTime = std::chrono::high_resolution_clock::now();
-        std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
-                  << "开始批量发送，总帧数: " << actualCount << std::endl;
-#endif
+        DEBUG_PRINT("[DEBUG][SerialPortManager::sendFramesBatch]: "
+                  << "开始批量发送，总帧数: " << actualCount);
         
         // 第一阶段：一次性拷贝所有帧数据到预分配缓冲区
         for (size_t i = 0; i < actualCount; ++i) {
@@ -387,27 +370,25 @@ public:
             
             // 帧完整性验证：每个帧必须是13字节
             if (binaryData.size() != CAN_FRAME_SIZE) {
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
-                          << "第 " << i << " 帧长度错误：预期13字节，实际" 
-                          << std::to_string(binaryData.size()) << "字节" << std::endl;
-#endif
+                DEBUG_PRINT("[ERROR][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧长度错误：预期13字节，实际"
+                          << std::to_string(binaryData.size()) << "字节");
                 return 0; // 有帧长度错误，直接返回失败
             }
-            
+
             // 将帧数据复制到预分配缓冲区的对应位置
             std::memcpy(sendBuffer_.data() + i * CAN_FRAME_SIZE, binaryData.data(), CAN_FRAME_SIZE);
-            
-#ifdef ENABLE_SERIAL_DEBUG
+
             // 显示准备发送的帧内容
-            std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
+            std::ostringstream frameStream;
+            frameStream << "[DEBUG][SerialPortManager::sendFramesBatch]: "
                       << "第 " << i << " 帧准备发送: ";
             for (size_t j = 0; j < CAN_FRAME_SIZE; ++j) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0')
-                          << static_cast<int>(sendBuffer_[i * CAN_FRAME_SIZE + j]) << " ";
+                frameStream << std::hex << std::setw(2) << std::setfill('0')
+                           << static_cast<int>(sendBuffer_[i * CAN_FRAME_SIZE + j]) << " ";
             }
-            std::cout << std::dec << std::endl;
-#endif
+            frameStream << std::dec;
+            DEBUG_PRINT(frameStream.str());
         }
         
         size_t successCount = 0;
@@ -423,40 +404,35 @@ public:
                 }
                 
                 successCount++;
-                
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cout << "[DEBUG][SerialPortManager::sendFramesBatch]: "
-                          << "第 " << i << " 帧发送成功" << std::endl;
-#endif
+
+                DEBUG_PRINT("[DEBUG][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧发送成功");
             }
             catch (const std::exception& e) {
                 connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cerr << "[ERROR][SerialPortManager::sendFramesBatch]: "
-                          << "第 " << i << " 帧发送失败: " << e.what() << std::endl;
-#endif
+                DEBUG_PRINT("[ERROR][SerialPortManager::sendFramesBatch]: "
+                          << "第 " << i << " 帧发送失败: " << e.what());
                 break; // 发送失败，停止继续发送
             }
         }
-        
-#ifdef ENABLE_SERIAL_DEBUG
+
         // 结束计时并计算耗时（纳秒转换为微秒）
         auto endTime = std::chrono::high_resolution_clock::now();
         auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
         double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
-        
+
         // 输出批量发送耗时统计
-        std::cout << "[PERF][SerialPortManager::sendFramesBatch]: "
+        std::ostringstream perfStream;
+        perfStream << "[PERF][SerialPortManager::sendFramesBatch]: "
                   << "批量发送完成，成功发送: " << successCount << "/" << actualCount << " 帧, "
-                  << "总耗时: " << std::fixed << std::setprecision(2) 
+                  << "总耗时: " << std::fixed << std::setprecision(2)
                   << elapsedTimeUs << " us";
-        
+
         if (successCount > 0) {
-            std::cout << ", 平均每帧: " << std::fixed << std::setprecision(2) 
+            perfStream << ", 平均每帧: " << std::fixed << std::setprecision(2)
                       << (elapsedTimeUs / successCount) << " us/帧";
         }
-        std::cout << std::endl;
-#endif
+        DEBUG_PRINT(perfStream.str());
         
         return successCount;
     }
@@ -471,9 +447,7 @@ public:
      */
     bool sendRawData(const std::vector<uint8_t>& data) {
         if (!isConnected()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::sendRawData]: 串口未连接" << std::endl;
-#endif
+            DEBUG_PRINT("[WARN][SerialPortManager::sendRawData]: 串口未连接");
             return false;
         }
         
@@ -485,9 +459,7 @@ public:
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendRawData]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::sendRawData]: " << e.what());
             return false;
         }
     }
@@ -501,9 +473,7 @@ public:
         std::vector<uint8_t> buffer(maxSize);
         
         if (!isConnected()) {
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[WARN][SerialPortManager::receiveData]: 串口未连接" << std::endl;
-#endif
+            DEBUG_PRINT("[WARN][SerialPortManager::receiveData]: 串口未连接");
             return buffer;
         }
         
@@ -516,9 +486,7 @@ public:
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::receiveData]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::receiveData]: " << e.what());
             return {};
         }
     }
@@ -607,44 +575,42 @@ public:
                 throw std::runtime_error("内部错误：发送数据总长度不是13字节的整数倍");
             }
 
-#ifdef ENABLE_SERIAL_DEBUG
-
-
-            // 开始计时（纳秒精度）
+// 开始计时（纳秒精度）
             auto startTime = std::chrono::high_resolution_clock::now();
-#endif
-
 
             {
                 std::lock_guard<std::mutex> lock(sendMutex_);
                 // 同步发送所有数据
                 boost::asio::write(*serialPort_, boost::asio::buffer(sendBuffer_.data(), bytesToSend));
             }
-#ifdef ENABLE_SERIAL_DEBUG
+
             // 结束计时并计算耗时（纳秒转换为微秒）
             auto endTime = std::chrono::high_resolution_clock::now();
             auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
             double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
-            
 
-            std::cout << "[DEBUG][SerialPortManager::sendBufferSync]: "
+            // 输出发送统计信息
+            std::ostringstream statsStream;
+            statsStream << "[DEBUG][SerialPortManager::sendBufferSync]: "
                       << "同步批量发送完成，请求字节数: " << sendsize
                       << "，实际发送字节数: " << bytesToSend
                       << "，帧数: " << (bytesToSend / CAN_FRAME_SIZE)
-                      << "，耗时: " << std::fixed << std::setprecision(2) 
-                      << elapsedTimeUs << " us" << std::endl;
-            
+                      << "，耗时: " << std::fixed << std::setprecision(2)
+                      << elapsedTimeUs << " us";
+            DEBUG_PRINT(statsStream.str());
+
             // 显示每帧的详细信息
             for (size_t frameStart = 0; frameStart < bytesToSend; frameStart += CAN_FRAME_SIZE) {
-                std::cout << "[DEBUG][SerialPortManager::sendBufferSync]: "
+                std::ostringstream frameStream;
+                frameStream << "[DEBUG][SerialPortManager::sendBufferSync]: "
                           << "帧 " << (frameStart / CAN_FRAME_SIZE) << ": ";
                 for (size_t i = 0; i < CAN_FRAME_SIZE; ++i) {
-                    std::cout << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(sendBuffer_[frameStart + i]) << " ";
+                    frameStream << std::hex << std::setw(2) << std::setfill('0')
+                               << static_cast<int>(sendBuffer_[frameStart + i]) << " ";
                 }
-                std::cout << std::dec << std::endl;
+                frameStream << std::dec;
+                DEBUG_PRINT(frameStream.str());
             }
-#endif
             
             // 如果需要清空缓冲区
             if (clearAfterSend) {
@@ -655,9 +621,7 @@ public:
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendBufferSync]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::sendBufferSync]: " << e.what());
             return 0;
         }
     }
@@ -702,13 +666,11 @@ public:
         size_t totalBytesSent = 0;
         
         try {
-#ifdef ENABLE_SERIAL_DEBUG
             // 开始计时（纳秒精度）
             auto startTime = std::chrono::high_resolution_clock::now();
-            std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+            DEBUG_PRINT("[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
                       << "开始循环发送，总字节数: " << totalBytesToSend
-                      << "，总帧数: " << (totalBytesToSend / CAN_FRAME_SIZE) << std::endl;
-#endif
+                      << "，总帧数: " << (totalBytesToSend / CAN_FRAME_SIZE));
 
             // 第二阶段：循环发送每一帧
             for (size_t offset = 0; offset < totalBytesToSend; offset += CAN_FRAME_SIZE) {
@@ -725,37 +687,39 @@ public:
                 }
                 
                 totalBytesSent += CAN_FRAME_SIZE;
-                
-#ifdef ENABLE_SERIAL_DEBUG
-                std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+
+                // 显示发送的帧内容
+                std::ostringstream frameStream;
+                frameStream << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
                           << "帧 " << (offset / CAN_FRAME_SIZE) << ": ";
                 for (size_t i = 0; i < CAN_FRAME_SIZE; ++i) {
-                    std::cout << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(sendBuffer_[offset + i]) << " ";
+                    frameStream << std::hex << std::setw(2) << std::setfill('0')
+                               << static_cast<int>(sendBuffer_[offset + i]) << " ";
                 }
-                std::cout << std::dec << std::endl;
-#endif
+                frameStream << std::dec;
+                DEBUG_PRINT(frameStream.str());
             }
 
-#ifdef ENABLE_SERIAL_DEBUG
             // 结束计时并计算耗时（纳秒转换为微秒）
             auto endTime = std::chrono::high_resolution_clock::now();
             auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime);
             double elapsedTimeUs = durationNs.count() / 1000.0; // 纳秒转换为微秒
-            
-            std::cout << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
+
+            // 输出发送完成统计
+            std::ostringstream statsStream;
+            statsStream << "[DEBUG][SerialPortManager::sendBufferSyncAuto]: "
                       << "循环发送完成，总发送字节数: " << totalBytesSent
                       << "，总帧数: " << (totalBytesSent / CAN_FRAME_SIZE)
-                      << "，总耗时: " << std::fixed << std::setprecision(2) 
-                      << elapsedTimeUs << " us" << std::endl;
-            
+                      << "，总耗时: " << std::fixed << std::setprecision(2)
+                      << elapsedTimeUs << " us";
+
             if (totalBytesSent > 0) {
                 double avgTimePerFrame = elapsedTimeUs / (totalBytesSent / CAN_FRAME_SIZE);
-                std::cout << "[PERF][SerialPortManager::sendBufferSyncAuto]: "
-                          << "平均每帧耗时: " << std::fixed << std::setprecision(2) 
-                          << avgTimePerFrame << " us/帧" << std::endl;
+                statsStream << "[PERF][SerialPortManager::sendBufferSyncAuto]: "
+                          << "平均每帧耗时: " << std::fixed << std::setprecision(2)
+                          << avgTimePerFrame << " us/帧";
             }
-#endif
+            DEBUG_PRINT(statsStream.str());
             
             // 如果需要清空缓冲区（确保完全清空）
             if (clearAfterSend) {
@@ -766,14 +730,14 @@ public:
         }
         catch (const std::exception& e) {
             connected_.store(false, std::memory_order_release);
-#ifdef ENABLE_SERIAL_DEBUG
-            std::cerr << "[ERROR][SerialPortManager::sendBufferSyncAuto]: " << e.what() << std::endl;
-#endif
+            DEBUG_PRINT("[ERROR][SerialPortManager::sendBufferSyncAuto]: " << e.what());
             return totalBytesSent; // 返回已成功发送的字节数
         }
     }
     
     
 };
+
+#undef ENABLE_DEBUG_OUTPUT
 
 #endif // SERIAL_MODULE_HPP

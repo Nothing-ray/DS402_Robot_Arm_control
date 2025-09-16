@@ -491,6 +491,88 @@ public:
     }
     
     /**
+     * @brief 从另一个环形缓冲区复制数据（基础版本）
+     * @param source 源环形缓冲区
+     * @param bytesToCopy 要复制的字节数
+     * @return 实际复制的字节数
+     *
+     * @details 实现环形缓冲区之间的直接数据复制，避免中间缓冲区。
+     * 采用双重锁定确保线程安全，自动处理环形边界情况。
+     * 此方法会同时消费源缓冲区的数据，实现完整的数据转移。
+     *
+     * @features:
+     * - 直接内存拷贝，无中间缓冲区
+     * - 处理环形边界情况
+     * - 双重锁定确保线程安全
+     * - 自动消费源缓冲区数据
+     * - 由调用者确保参数合法性
+     *
+     * @note 调用者需确保bytesToCopy不超过源缓冲区的可用空间和目标缓冲区的剩余空间
+     * @warning 为避免死锁，调用者需确保不会同时在多个线程中反向复制两个缓冲区
+     */
+    size_t copyFrom(CircularBuffer& source, size_t bytesToCopy) {
+        if (bytesToCopy == 0) {
+            return 0;
+        }
+
+        // 双重锁定：先锁源，后锁目标（固定顺序避免死锁）
+        std::unique_lock<std::mutex> sourceLock(source.control_.mutex_, std::defer_lock);
+        std::unique_lock<std::mutex> destLock(control_.mutex_, std::defer_lock);
+
+        // 同时锁定两个缓冲区
+        std::lock(sourceLock, destLock);
+
+        // 检查实际可复制的字节数
+        size_t actualBytesToCopy = std::min(bytesToCopy, static_cast<size_t>(source.control_.used_));
+        size_t availableSpace = CIRCULAR_BUFFER_CAPACITY - control_.used_;
+        actualBytesToCopy = std::min(actualBytesToCopy, availableSpace);
+
+        if (actualBytesToCopy == 0) {
+            return 0;
+        }
+
+        // 执行数据复制
+        size_t bytesCopied = 0;
+        uint32_t sourceReadIndex = source.maskIndex(source.reader_.readPos_);
+        uint32_t destWriteIndex = maskIndex(writer_.writePos_);
+
+        while (bytesCopied < actualBytesToCopy) {
+            size_t remainingBytes = actualBytesToCopy - bytesCopied;
+
+            // 计算源缓冲区的连续可用空间
+            size_t sourceContiguousSpace = CIRCULAR_BUFFER_CAPACITY - sourceReadIndex;
+            sourceContiguousSpace = std::min(sourceContiguousSpace, remainingBytes);
+
+            // 计算目标缓冲区的连续可用空间
+            size_t destContiguousSpace = CIRCULAR_BUFFER_CAPACITY - destWriteIndex;
+            destContiguousSpace = std::min(destContiguousSpace, remainingBytes);
+
+            // 计算本次可拷贝的字节数
+            size_t bytesToCopyThisBatch = std::min(sourceContiguousSpace, destContiguousSpace);
+
+            // 执行内存拷贝
+            std::memcpy(&buffer_[destWriteIndex], &source.buffer_[sourceReadIndex], bytesToCopyThisBatch);
+
+            // 更新索引和计数
+            sourceReadIndex = source.maskIndex(sourceReadIndex + bytesToCopyThisBatch);
+            destWriteIndex = maskIndex(destWriteIndex + bytesToCopyThisBatch);
+            bytesCopied += bytesToCopyThisBatch;
+        }
+
+        // 更新源和目标缓冲区的位置和使用量
+        source.reader_.readPos_ = sourceReadIndex;
+        source.control_.used_ -= bytesCopied;
+        writer_.writePos_ = destWriteIndex;
+        control_.used_ += bytesCopied;
+
+        // 通知等待线程
+        source.notFull_.notify_all();
+        notEmpty_.notify_all();
+
+        return bytesCopied;
+    }
+
+    /**
      * @brief 获取缓冲区总容量
      * @return 总容量字节数
      */

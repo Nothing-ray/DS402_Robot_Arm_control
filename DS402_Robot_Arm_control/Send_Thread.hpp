@@ -37,8 +37,12 @@
 // 超时处理详细模式（默认关闭）
 // #define ENABLE_DETAILED_TIMEOUT_HANDLING
 
+//调试输出开关（修改后面的值）
+#define ENABLE_DEBUG_OUTPUT true
+
+
 // 调试输出控制（零开销宏）
-#ifdef ENABLE_DEBUG_OUTPUT
+#if ENABLE_DEBUG_OUTPUT
 #define DEBUG_PRINT(msg) do { std::cout << msg << std::endl; } while(0)
 #define DEBUG_PRINT_IF(cond, msg) do { if (cond) { std::cout << msg << std::endl; } } while(0)
 #else
@@ -83,9 +87,7 @@ private:
     static constexpr uint8_t MOTOR_ARRAY_SIZE = 6;  // 电机数组固定大小
     uint8_t motorCount_;
     
-    // 预分配的13字节CAN帧缓冲区（避免内存分配开销）
-    alignas(64) std::array<uint8_t, CAN_FRAME_SIZE> canFrameBuffer_;
-    
+        
     // 预分配的PDO数据结构（固定大小数组，零分配开销）
     static constexpr size_t PDO_MAX_MOTORS = 12;  // PDO系统支持的最大电机数
     static constexpr size_t PDO_CHANNELS_PER_MOTOR = 2;
@@ -261,19 +263,19 @@ private:
  * 
  * @details 实现单个SDO帧的完整处理流程，从数据读取到串口发送。
  * 采用高性能设计和错误处理机制，确保实时性和可靠性。
- * 
+ *
  * 核心设计特点：
- * - **零拷贝设计**：使用预分配的13字节缓冲区，避免动态内存分配
- * - **事务性操作**：使用peek查看数据但不消费，确保原子性
+ * - **零中间拷贝**：使用copyFrom直接在缓冲区间传输数据，避免中间缓冲区
+ * - **原子性操作**：使用copyFrom确保数据传输的原子性
  * - **字节级处理**：直接操作字节数据，避免CanFrame对象创建开销
  * - **柯理化设计**：返回处理结果供上层决策，实现逻辑分离
  * - **错误恢复**：完善的异常处理和状态清理机制
- * 
+ *
  * 处理流程：
  * 1. 使用peek预检查数据可用性（不消费）
  * 2. 通过prepareTransactionFromBytes准备SDO事务
  * 3. 启动事务并验证状态机状态
- * 4. 成功后消费数据并发送到串口
+ * 4. 成功后直接复制数据到发送缓冲区并发送
  * 5. 异常情况下进行状态清理和错误报告
  * 
  * @return SdoProcessResult 处理结果：
@@ -285,9 +287,9 @@ private:
  * @exception std::exception 处理过程中可能抛出各种异常
  * 
  * @note 性能优化点：
- * - 使用64字节对齐的预分配缓冲区
- * - 避免任何动态内存分配
- * - 最小化函数调用开销
+ * - 使用copyFrom实现缓冲区间零拷贝传输
+ * - 避免任何动态内存分配和中间缓冲区
+ * - 最小化函数调用开销和内存拷贝次数
  * 
  * @warning 重要约束：
  * - 必须确保缓冲区有完整的13字节CAN帧数据
@@ -297,8 +299,8 @@ private:
  * @see SdoProcessResult SDO状态机相关类
  */
     inline SdoProcessResult processSingleSdoFrame() {
-        // 步骤1：事务性数据预检查（使用peek确保原子性）
-        // 采用peek操作查看数据但不消费，确保后续操作的原子性
+        // 步骤1：数据预检查（使用peek确保原子性）
+        // 采用peek操作查看数据但不消费，用于SDO事务准备
         auto frameData = planBuffer_.peek();
 
         DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 开始处理SDO帧");
@@ -327,26 +329,17 @@ private:
             }
             DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 事务启动成功");
 
-            // 事务启动成功，进入数据消费阶段
+            // 步骤4：数据复制和发送（使用copyFrom直接传输到发送缓冲区）
+            // 直接从planBuffer复制数据到sendBuffer，避免中间缓冲区，提高性能
+            DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 开始数据复制，预期13字节");
+            size_t bytesCopied = sendBuffer_.copyFrom(planBuffer_, CAN_FRAME_SIZE);
 
-            // 步骤4：数据消费（从事务性读取到实际消费）
-            // 从事务性预检查切换到实际数据消费，确保数据完整性
-            DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 开始数据消费，预期13字节");
-            size_t bytesPopped = planBuffer_.popBytes(canFrameBuffer_.data(), CAN_FRAME_SIZE);
+            DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 实际复制字节数: " << bytesCopied);
 
-            DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 实际消费字节数: " << bytesPopped);
-            if (bytesPopped > 0) {
-                DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 消费的数据前4字节: 0x"
-                    << std::hex << static_cast<int>(canFrameBuffer_[0]) << " "
-                    << static_cast<int>(canFrameBuffer_[1]) << " "
-                    << static_cast<int>(canFrameBuffer_[2]) << " "
-                    << static_cast<int>(canFrameBuffer_[3]) << std::dec);
-            }
-
-            // 验证数据完整性：确保成功消费完整的13字节CAN帧
-            if (bytesPopped != CAN_FRAME_SIZE) {
-                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 数据消费失败，预期13字节，实际: " << bytesPopped);
-                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 可能原因：缓冲区数据不完整或帧格式错误");
+            // 验证数据完整性：确保成功复制完整的13字节CAN帧
+            if (bytesCopied != CAN_FRAME_SIZE) {
+                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 数据复制失败，预期13字节，实际: " << bytesCopied);
+                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 可能原因：缓冲区数据不完整或空间不足");
                 // 清理状态机，避免事务悬挂
                 sdoStateMachine_.completeTransaction();
                 return SdoProcessResult::SDO_ERROR;
@@ -355,11 +348,11 @@ private:
             // 步骤5：串口发送（使用同步发送接口）
             // 通过串口管理器发送数据，复用批量发送接口保证一致性
             DEBUG_PRINT("[DEBUG][processSingleSdoFrame]: 开始串口发送，预期13字节");
-            size_t bytesSent = serialManager_.sendBufferSync(sendBuffer_, CAN_FRAME_SIZE, false);
+            size_t bytesSent = serialManager_.sendBufferSync(sendBuffer_, bytesCopied, false);
 
             // 验证发送完整性：确保所有字节成功发送
-            if (bytesSent != CAN_FRAME_SIZE) {
-                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: SDO帧发送失败，预期13字节，实际: " << bytesSent);
+            if (bytesSent != bytesCopied) {
+                DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: SDO帧发送失败，预期" << bytesCopied << "字节，实际: " << bytesSent);
                 DEBUG_PRINT("[ERROR][SendThread::processSingleSdoFrame]: 可能原因：串口未连接或发送缓冲区问题");
                 // 发送失败时清理状态机，避免资源泄漏
                 sdoStateMachine_.completeTransaction();
@@ -579,9 +572,6 @@ public:
         }
         
         motorCount_ = motorCount;
-        
-        // 初始化预分配缓冲区
-        canFrameBuffer_.fill(0);
         
         // 预分配PDO数据结构 - 填充所有可能的COB-ID槽位
         
@@ -947,5 +937,6 @@ public:
     }
 };
 
+#undef ENABLE_DEBUG_OUTPUT
 
 #endif // SEND_THREAD_HPP
