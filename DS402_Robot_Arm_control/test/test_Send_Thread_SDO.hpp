@@ -31,6 +31,7 @@
 #include <chrono>
 #include <memory>
 #include <vector>
+#include <string>
 #include <cassert>
 
 #include "Send_Thread.hpp"
@@ -42,8 +43,8 @@
 #include "PDO_config.hpp"
 
 // 测试配置宏
-#define ENABLE_SDO_TEST_DEBUG
-#ifdef ENABLE_SDO_TEST_DEBUG
+#define ENABLE_SDO_TEST_DEBUG 0
+#if ENABLE_SDO_TEST_DEBUG
 #define TEST_DEBUG_PRINT(msg) do { std::cout << "[DEBUG][TestSendThread]: " << msg << std::endl; } while(0)
 #else
 #define TEST_DEBUG_PRINT(msg) do { } while(0)
@@ -395,8 +396,8 @@ public:
                 }
 
                 // 输出调试信息
-                std::cout << "[DEBUG][TestValidator]: 验证读取响应 - 命令: 0x" << std::hex
-                          << static_cast<int>(responseData[0]) << std::dec << std::endl;
+                TEST_DEBUG_PRINT("验证读取响应 - 命令: 0x" << std::hex
+                          << static_cast<int>(responseData[0]) << std::dec);
 
                 // 验证数据部分（跳过命令字节）
                 for (uint8_t i = 0; i < expectedSize && i < 7; ++i) {
@@ -432,7 +433,7 @@ public:
                                    (static_cast<uint32_t>(responseData[3]) << 16) |
                                    (static_cast<uint32_t>(responseData[2]) << 8) |
                                    responseData[1];
-                std::cout << "[DEBUG][TestValidator]: 错误响应码: 0x" << std::hex << errorCode << std::dec << std::endl;
+                TEST_DEBUG_PRINT("错误响应码: 0x" << std::hex << errorCode << std::dec);
                 break;
             }
 
@@ -515,11 +516,11 @@ public:
 
         // 验证帧信息字节的高4位标志位
         uint8_t frameFlags = (completeFrame[0] & 0xF0) >> 4;
-        std::cout << "[DEBUG][TestValidator]: 帧信息标志位: 0x" << std::hex
-                  << static_cast<int>(frameFlags) << std::dec << std::endl;
+        TEST_DEBUG_PRINT("帧信息标志位: 0x" << std::hex
+                  << static_cast<int>(frameFlags) << std::dec);
 
         // 输出完整帧的十六进制转储
-        std::cout << "[DEBUG][TestValidator]: 完整13字节CAN帧内容:" << std::endl;
+        TEST_DEBUG_PRINT("完整13字节CAN帧内容:");
         for (size_t i = 0; i < completeFrame.size(); ++i) {
             std::cout << "字节" << std::setw(2) << i << ": 0x"
                       << std::hex << std::setw(2) << std::setfill('0')
@@ -534,7 +535,7 @@ public:
 
         // 验证SDO数据区域（字节5-12）
         std::vector<uint8_t> sdoDataArea(completeFrame.begin() + 5, completeFrame.begin() + 13);
-        std::cout << "[DEBUG][TestValidator]: SDO数据区域提取:" << std::endl;
+        TEST_DEBUG_PRINT("SDO数据区域提取:");
         for (size_t i = 0; i < sdoDataArea.size(); ++i) {
             std::cout << "SDO字节" << std::setw(2) << i << ": 0x"
                       << std::hex << std::setw(2) << std::setfill('0')
@@ -543,7 +544,7 @@ public:
             std::cout << std::endl;
         }
 
-        std::cout << "[DEBUG][TestValidator]: 13字节CAN帧结构验证通过" << std::endl;
+        TEST_DEBUG_PRINT("13字节CAN帧结构验证通过");
         return true;
     }
 
@@ -569,48 +570,52 @@ public:
         auto responseType = stateMachine.getResponseType();
         uint8_t retryCount = stateMachine.getRetryCount();
 
-        std::cout << "[DEBUG][TestValidator]: 当前状态: " << static_cast<int>(currentState) << " (";
+        // 构建状态字符串
+        std::string stateStr;
         switch (currentState) {
-            case canopen::SdoState::IDLE: std::cout << "IDLE"; break;
-            case canopen::SdoState::WAITING_RESPONSE: std::cout << "WAITING_RESPONSE"; break;
-            case canopen::SdoState::RESPONSE_VALID: std::cout << "RESPONSE_VALID"; break;
-            case canopen::SdoState::RESPONSE_ERROR: std::cout << "RESPONSE_ERROR"; break;
-            case canopen::SdoState::TIMEOUT: std::cout << "TIMEOUT"; break;
-            case canopen::SdoState::RETRYING: std::cout << "RETRYING"; break;
-            case canopen::SdoState::MAX_RETRIES_EXCEEDED: std::cout << "MAX_RETRIES_EXCEEDED"; break;
-            default: std::cout << "UNKNOWN"; break;
+            case canopen::SdoState::IDLE: stateStr = "IDLE"; break;
+            case canopen::SdoState::WAITING_RESPONSE: stateStr = "WAITING_RESPONSE"; break;
+            case canopen::SdoState::RESPONSE_VALID: stateStr = "RESPONSE_VALID"; break;
+            case canopen::SdoState::RESPONSE_ERROR: stateStr = "RESPONSE_ERROR"; break;
+            case canopen::SdoState::TIMEOUT: stateStr = "TIMEOUT"; break;
+            case canopen::SdoState::RETRYING: stateStr = "RETRYING"; break;
+            case canopen::SdoState::MAX_RETRIES_EXCEEDED: stateStr = "MAX_RETRIES_EXCEEDED"; break;
+            default: stateStr = "UNKNOWN"; break;
         }
-        std::cout << ")" << std::endl;
 
-        std::cout << "[DEBUG][TestValidator]: 繁忙状态: " << (isBusy ? "是" : "否") << std::endl;
+        TEST_DEBUG_PRINT("当前状态: " << static_cast<int>(currentState) << " (" << stateStr << ")");
 
-        std::cout << "[DEBUG][TestValidator]: 响应类型: " << static_cast<int>(responseType) << " (";
+        TEST_DEBUG_PRINT("繁忙状态: " << (isBusy ? "是" : "否"));
+
+        // 构建响应类型字符串
+        std::string responseTypeStr;
         switch (responseType) {
-            case canopen::SdoResponseType::NO_RESPONSE: std::cout << "NO_RESPONSE"; break;
-            case canopen::SdoResponseType::UNKNOWN: std::cout << "UNKNOWN"; break;
-            case canopen::SdoResponseType::READ_8BIT: std::cout << "READ_8BIT"; break;
-            case canopen::SdoResponseType::READ_16BIT: std::cout << "READ_16BIT"; break;
-            case canopen::SdoResponseType::READ_32BIT: std::cout << "READ_32BIT"; break;
-            case canopen::SdoResponseType::WRITE_SUCCESS: std::cout << "WRITE_SUCCESS"; break;
-            case canopen::SdoResponseType::ERROR_RESPONSE: std::cout << "ERROR_RESPONSE"; break;
-            default: std::cout << "INVALID"; break;
+            case canopen::SdoResponseType::NO_RESPONSE: responseTypeStr = "NO_RESPONSE"; break;
+            case canopen::SdoResponseType::UNKNOWN: responseTypeStr = "UNKNOWN"; break;
+            case canopen::SdoResponseType::READ_8BIT: responseTypeStr = "READ_8BIT"; break;
+            case canopen::SdoResponseType::READ_16BIT: responseTypeStr = "READ_16BIT"; break;
+            case canopen::SdoResponseType::READ_32BIT: responseTypeStr = "READ_32BIT"; break;
+            case canopen::SdoResponseType::WRITE_SUCCESS: responseTypeStr = "WRITE_SUCCESS"; break;
+            case canopen::SdoResponseType::ERROR_RESPONSE: responseTypeStr = "ERROR_RESPONSE"; break;
+            default: responseTypeStr = "INVALID"; break;
         }
-        std::cout << ")" << std::endl;
 
-        std::cout << "[DEBUG][TestValidator]: 重试次数: " << static_cast<int>(retryCount) << std::endl;
+        TEST_DEBUG_PRINT("响应类型: " << static_cast<int>(responseType) << " (" << responseTypeStr << ")");
+
+        TEST_DEBUG_PRINT("重试次数: " << static_cast<int>(retryCount));
 
         // 响应数据诊断
         auto responseData = stateMachine.getResponseData();
         if (responseData.has_value()) {
             const auto& data = responseData.value();
-            std::cout << "[DEBUG][TestValidator]: 响应数据 (8字节): ";
+            TEST_DEBUG_PRINT("响应数据 (8字节): ");
             for (uint8_t i = 0; i < 8; ++i) {
                 std::cout << std::hex << "0x" << std::setw(2) << std::setfill('0')
                           << static_cast<int>(data[i]) << " ";
             }
             std::cout << std::dec << std::endl;
         } else {
-            std::cout << "[DEBUG][TestValidator]: 无响应数据" << std::endl;
+            TEST_DEBUG_PRINT("无响应数据");
         }
 
         std::cout << "=== 诊断结束 ===" << std::endl;
@@ -653,7 +658,7 @@ bool testSendThreadSdoFunctionality() {
             // 返回失败，但不抛出异常，让其他测试可以继续
             return false;
         } else {
-            std::cout << "[DEBUG][TestSendThread]: 串口连接成功" << std::endl;
+            TEST_DEBUG_PRINT("串口连接成功");
         }
         
         // 使用std::array创建电机实例（编译期确定大小，避免动态分配）
@@ -680,8 +685,8 @@ bool testSendThreadSdoFunctionality() {
             const auto& binaryFrame = sdoReadFrame.getBinaryFrame();
             TEST_DEBUG_PRINT("构建的SDO帧 - ID: 0x" << std::hex << sdoReadFrame.frameID << std::dec);
             TEST_DEBUG_PRINT("帧DLC: " << static_cast<int>(sdoReadFrame.dlc));
-            TEST_DEBUG_PRINT("帧数据: " << std::hex << "0x" << static_cast<int>(binaryFrame[0]) << " " 
-                      << static_cast<int>(binaryFrame[1]) << " " << static_cast<int>(binaryFrame[2]) << " " 
+            TEST_DEBUG_PRINT("帧数据: " << std::hex << "0x" << static_cast<int>(binaryFrame[0]) << " "
+                      << static_cast<int>(binaryFrame[1]) << " " << static_cast<int>(binaryFrame[2]) << " "
                       << static_cast<int>(binaryFrame[3]) << std::dec);
             
             // 检查发送线程状态
@@ -698,7 +703,7 @@ bool testSendThreadSdoFunctionality() {
             auto& sdoStateMachine = sendThread.getSdoStateMachine();
             auto initialState = sdoStateMachine.getCurrentState();
             bool initialBusy = sdoStateMachine.isBusy();
-            TEST_DEBUG_PRINT("发送前状态: " << static_cast<int>(initialState) 
+            TEST_DEBUG_PRINT("发送前状态: " << static_cast<int>(initialState)
                              << ", 繁忙状态: " << (initialBusy ? "是" : "否"));
             
             // 将帧数据写入规划缓冲区
@@ -736,8 +741,8 @@ bool testSendThreadSdoFunctionality() {
                 std::cout << "[DEBUG][Test]: 响应类型: " << static_cast<int>(responseType) << std::endl;
 
                 // 等待更长时间再次检查（考虑发送线程处理延迟）
-                TEST_DEBUG_PRINT("额外等待500ms再次检查...");
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                TEST_DEBUG_PRINT("额外等待10ms再次检查...");
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 state = sdoStateMachine.getCurrentState();
                 std::cout << "[DEBUG][Test]: 额外等待后状态: " << static_cast<int>(state) << std::endl;
 
@@ -772,7 +777,7 @@ bool testSendThreadSdoFunctionality() {
             // 验证状态一致性
             auto finalState = sdoStateMachine.getCurrentState();
             bool finalBusy = sdoStateMachine.isBusy();
-            TEST_DEBUG_PRINT("最终状态: " << static_cast<int>(finalState) 
+            TEST_DEBUG_PRINT("最终状态: " << static_cast<int>(finalState)
                              << ", 繁忙状态: " << (finalBusy ? "是" : "否"));
             
             if (finalState == canopen::SdoState::WAITING_RESPONSE && !finalBusy) {
@@ -803,7 +808,7 @@ bool testSendThreadSdoFunctionality() {
                 planBuffer.pushBytes(binaryFrame.data(), binaryFrame.size());
                 
                 // 等待处理（考虑发送线程的2ms周期）
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
                 // 验证状态（使用增强的等待机制）
                 TEST_DEBUG_PRINT("验证新事务状态...");
@@ -954,7 +959,7 @@ bool testSendThreadSdoFunctionality() {
             // 验证当前状态和重试计数
             auto finalState = sdoStateMachine.getCurrentState();
             uint8_t retryCount = sdoStateMachine.getRetryCount();
-            TEST_DEBUG_PRINT("超时测试后状态: " << static_cast<int>(finalState) 
+            TEST_DEBUG_PRINT("超时测试后状态: " << static_cast<int>(finalState)
                              << ", 重试计数: " << static_cast<int>(retryCount));
             
             // 手动设置重试状态进行测试
@@ -965,7 +970,7 @@ bool testSendThreadSdoFunctionality() {
             TEST_DEBUG_PRINT("完成事务，状态重置");
             
             // 短暂等待确保状态重置完成
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             
             TEST_DEBUG_PRINT("超时重试机制测试通过（模拟测试）");
         }
@@ -977,7 +982,7 @@ bool testSendThreadSdoFunctionality() {
             
             // 完成当前事务
             sdoStateMachine.completeTransaction();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             
             // 发送一个新的SDO请求
             CanFrame sdoFrame = SdoFrameBuilder::buildWriteRequest(1, 0x6040, 0, 
@@ -988,7 +993,7 @@ bool testSendThreadSdoFunctionality() {
             TEST_DEBUG_PRINT("发送SDO写请求用于错误处理测试");
             
             // 等待处理（考虑发送线程的2ms周期）
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
             // 验证状态为等待响应
             TEST_DEBUG_PRINT("验证错误处理测试的初始状态...");
@@ -1083,3 +1088,5 @@ bool testSendThreadSdoFunctionality() {
 }
 
 #endif // TEST_SEND_THREAD_HPP
+
+

@@ -14,7 +14,7 @@
 #include <iostream>
 
 // 符合CLAUDE.md的测试标准：将整个测试流程包装到单一函数内
-#include "test/test_Send_Thread.hpp"
+#include "test/test_Send_Thread_SDO.hpp"
 #include "test/test_SDO_State_Machine.hpp"
 #include "test/test_Serial_Manager_Basic.hpp"
 #include "Serial_Module.hpp"
@@ -40,8 +40,7 @@ int runAllTests() {
     auto startTime = std::chrono::steady_clock::now();
 
     try {
-
-              // 测试2: 发送线程SDO功能 - 这是当前的主要测试目标
+        // 测试2: 发送线程SDO功能 - 这是当前的主要测试目标
         std::cout << "\n[TEST]: 开始发送线程SDO功能测试..." << std::endl;
 
         bool sdoTestResult = testSendThreadSdoFunctionality();
@@ -107,8 +106,3 @@ int main() {
         return 1;
     }
 }
-
-
-
-
-

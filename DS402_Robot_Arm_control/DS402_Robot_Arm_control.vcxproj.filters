@@ -63,7 +63,7 @@
     <ClInclude Include="test\test_CLASS_Motor.hpp">
       <Filter>头文件\测试</Filter>
     </ClInclude>
-    <ClInclude Include="test\test_Send_Thread.hpp">
+    <ClInclude Include="test\test_Send_Thread_SDO.hpp">
       <Filter>头文件\测试</Filter>
     </ClInclude>
     <ClInclude Include="test\test_Serial_Module.hpp">

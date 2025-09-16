@@ -38,7 +38,7 @@
 // #define ENABLE_DETAILED_TIMEOUT_HANDLING
 
 //调试输出开关（修改后面的值）
-#define ENABLE_DEBUG_OUTPUT true
+#define ENABLE_DEBUG_OUTPUT false
 
 
 // 调试输出控制（零开销宏）
