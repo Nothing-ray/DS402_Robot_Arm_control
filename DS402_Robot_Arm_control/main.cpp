@@ -16,7 +16,7 @@
 // 符合CLAUDE.md的测试标准：将整个测试流程包装到单一函数内
 #include "test/test_Send_Thread_SDO.hpp"
 #include "test/test_SDO_State_Machine.hpp"
-#include "test/test_Serial_Manager_Basic.hpp"
+#include "test/test_Send_Thread_PDO.hpp"
 #include "Serial_Module.hpp"
 
 /**
@@ -40,7 +40,7 @@ int runAllTests() {
     auto startTime = std::chrono::steady_clock::now();
 
     try {
-        // 测试2: 发送线程SDO功能 - 这是当前的主要测试目标
+        // 测试1: 发送线程SDO功能测试
         std::cout << "\n[TEST]: 开始发送线程SDO功能测试..." << std::endl;
 
         bool sdoTestResult = testSendThreadSdoFunctionality();
@@ -49,6 +49,18 @@ int runAllTests() {
             std::cout << "[SUCCESS]: 发送线程SDO功能测试通过" << std::endl;
         } else {
             std::cout << "[ERROR]: 发送线程SDO功能测试失败" << std::endl;
+            testResult = 1;  // 设置失败标志
+        }
+
+        // 测试2: 发送线程PDO功能测试
+        std::cout << "\n[TEST]: 开始发送线程PDO功能测试..." << std::endl;
+
+        bool pdoTestResult = testSendThreadPdoFunctionality();
+
+        if (pdoTestResult) {
+            std::cout << "[SUCCESS]: 发送线程PDO功能测试通过" << std::endl;
+        } else {
+            std::cout << "[ERROR]: 发送线程PDO功能测试失败" << std::endl;
             testResult = 1;  // 设置失败标志
         }
 

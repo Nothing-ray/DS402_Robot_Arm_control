@@ -160,6 +160,7 @@
     <ClInclude Include="test\test_SDO_State_Machine.hpp" />
     <ClInclude Include="test\test_Send_Thread_SDO.hpp" />
     <ClInclude Include="test\test_Serial_Module.hpp" />
+    <ClInclude Include="test\test_Send_Thread_PDO.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
