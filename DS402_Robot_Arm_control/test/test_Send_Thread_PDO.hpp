@@ -43,6 +43,8 @@
 #include <cassert>
 #include <iomanip>
 #include <sstream>
+#include <numeric>
+#include <cstring>
 
 #include "Send_Thread.hpp"
 #include "CAN_frame.hpp"
@@ -51,39 +53,8 @@
 #include "CLASS_Motor.hpp"
 #include "PDO_config.hpp"
 
-// ====================== 简化计时工具 ======================
+// ====================== 计时工具 ======================
 
-// 计时工具宏
-#define TIME_IT(operation, description) \
-    do { \
-        auto start = std::chrono::high_resolution_clock::now(); \
-        operation; \
-        auto end = std::chrono::high_resolution_clock::now(); \
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start); \
-        std::cout << "[PERF][TestSendThreadPDO]: " << description << " took " << duration.count() << " us\n"; \
-    } while(0)
-
-// 计时并获取结果宏
-#define TIME_IT_RESULT(operation, description, result_var) \
-    do { \
-        auto start = std::chrono::high_resolution_clock::now(); \
-        result_var = operation; \
-        auto end = std::chrono::high_resolution_clock::now(); \
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start); \
-        std::cout << "[PERF][TestSendThreadPDO]: " << description << " took " << duration.count() << " us\n"; \
-    } while(0)
-
-// 批量计时统计宏
-#define TIME_IT_BATCH(operation, description, count_var, total_var) \
-    do { \
-        auto start = std::chrono::high_resolution_clock::now(); \
-        operation; \
-        auto end = std::chrono::high_resolution_clock::now(); \
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start); \
-        count_var++; \
-        total_var += duration.count(); \
-        std::cout << "[PERF][TestSendThreadPDO]: " << description << " took " << duration.count() << " us\n"; \
-    } while(0)
 
 // 测试配置宏
 #define ENABLE_PDO_TEST_DEBUG 1
@@ -199,6 +170,43 @@ public:
                               << ", 速度=0x" << data.motors[i].targetVelocity
                               << ", 电流=0x" << data.motors[i].targetCurrent
                               << std::dec);
+        }
+    }
+
+    /**
+     * @brief 将测试数据写入到电机数组（使用正确的标志位驱动方式）
+     * @param data 测试数据
+     * @param motors 电机数组引用
+     */
+    static void writeTestDataToMotors(const RpdoTestData& data, std::array<Motor, 6>& motors) {
+        for (uint8_t i = 0; i < 6; ++i) {
+            Motor& motor = motors.at(i);
+            const auto& motorData = data.motors[i];
+
+            // 写入RPDO1数据（位置+控制字）- 使用正确的标志位驱动方式
+            // 将原始位置值转换为角度值（假设范围是-180到180度）
+            float targetAngle = static_cast<float>(motorData.targetPosition) * 180.0f / 32768.0f;
+            motor.position.target_degree.store(targetAngle);
+            motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 使用memcpy处理volatile数组（控制字不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &motorData.controlWord, 2);
+
+            // 写入RPDO2数据（速度+电流）- 使用正确的标志位驱动方式
+            // 速度值直接使用RPM单位
+            float targetVelocityRpm = static_cast<float>(motorData.targetVelocity);
+            motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            // 电流值转换为mA单位
+            float targetCurrentMa = static_cast<float>(motorData.targetCurrent);
+            motor.current.target_current.store(targetCurrentMa);
+            motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            motor.refreshMotorData(motor.position);
+            motor.refreshMotorData(motor.velocity);
+            motor.refreshMotorData(motor.current);
         }
     }
 };
@@ -344,16 +352,33 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
         uint8_t testMotorIndex = 1;
         Motor& testMotor = motors.at(testMotorIndex - 1);
 
-        // 写入目标位置和控制字到电机
-        TIME_IT({
-            testMotor.position.raw_target.atomicWriteValue(testData.motors[testMotorIndex - 1].targetPosition);
-            testMotor.stateAndMode.controlData.controlWordRaw = testData.motors[testMotorIndex - 1].controlWord;
-        }, "写入RPDO1数据到电机");
+        // 写入目标位置和控制字到电机（使用正确的标志位驱动方式）
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            // 将原始位置值转换为角度值
+            float targetAngle = static_cast<float>(testData.motors[testMotorIndex - 1].targetPosition) * 180.0f / 32768.0f;
+            testMotor.position.target_degree.store(targetAngle);
+            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 控制字仍然使用memcpy（不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &testData.motors[testMotorIndex - 1].controlWord, 2);
+
+            // 调用刷新方法进行数据转换
+            testMotor.refreshMotorData(testMotor.position);
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO1数据到电机 took " << duration.count() << " us\n";
+        }
 
         // 等待发送线程处理PDO（考虑2ms周期）
-        TIME_IT({
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));  // 等待至少2个周期
-        }, "等待PDO处理");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 等待PDO处理 took " << duration.count() << " us\n";
+        }
 
         // 记录测试数据供外部验证
         PDO_TEST_DEBUG_PRINT("=== RPDO1外部验证数据 ===");
@@ -374,16 +399,36 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
         // 2. RPDO2测试（目标速度+目标电流）
         PDO_TEST_DEBUG_PRINT("测试1.2: RPDO2 - 目标速度和目标电流");
 
-        // 写入目标速度和目标电流到电机
-        TIME_IT({
-            testMotor.velocity.raw_target_velocity_mode.atomicWriteValue(testData.motors[testMotorIndex - 1].targetVelocity);
-            testMotor.current.raw_target.atomicWriteValue(testData.motors[testMotorIndex - 1].targetCurrent);
-        }, "写入RPDO2数据到电机");
+        // 写入目标速度和目标电流到电机（使用正确的标志位驱动方式）
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            // 速度值直接使用RPM单位
+            float targetVelocityRpm = static_cast<float>(testData.motors[testMotorIndex - 1].targetVelocity);
+            testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            // 电流值转换为mA单位
+            float targetCurrentMa = static_cast<float>(testData.motors[testMotorIndex - 1].targetCurrent);
+            testMotor.current.target_current.store(targetCurrentMa);
+            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            testMotor.refreshMotorData(testMotor.velocity);
+            testMotor.refreshMotorData(testMotor.current);
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO2数据到电机 took " << duration.count() << " us\n";
+        }
 
         // 等待发送线程处理PDO
-        TIME_IT({
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));  // 等待至少2个周期
-        }, "等待PDO处理");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 等待PDO处理 took " << duration.count() << " us\n";
+        }
 
         // 记录测试数据供外部验证
         PDO_TEST_DEBUG_PRINT("=== RPDO2外部验证数据 ===");
@@ -431,11 +476,29 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
 
             auto start = std::chrono::high_resolution_clock::now();
 
-            // 写入数据
-            testMotor.position.raw_target.atomicWriteValue(randomPos);
-            testMotor.stateAndMode.controlData.controlWordRaw = randomCtrl;
-            testMotor.velocity.raw_target_velocity_mode.atomicWriteValue(randomVel);
-            testMotor.current.raw_target.atomicWriteValue(randomCur);
+            // 写入数据（使用正确的标志位驱动方式）
+            // 位置：转换为角度值
+            float targetAngle = static_cast<float>(randomPos) * 180.0f / 32768.0f;
+            testMotor.position.target_degree.store(targetAngle);
+            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 控制字仍然使用memcpy（不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &randomCtrl, 2);
+
+            // 速度：转换为RPM单位
+            float targetVelocityRpm = static_cast<float>(randomVel);
+            testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            // 电流：转换为mA单位
+            float targetCurrentMa = static_cast<float>(randomCur);
+            testMotor.current.target_current.store(targetCurrentMa);
+            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            testMotor.refreshMotorData(testMotor.position);
+            testMotor.refreshMotorData(testMotor.velocity);
+            testMotor.refreshMotorData(testMotor.current);
 
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -487,27 +550,54 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
         // 2. 批量写入所有电机数据
         PDO_TEST_DEBUG_PRINT("测试2.2: 批量写入所有电机数据");
 
-        TIME_IT({
+        // 批量写入6个电机数据
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             for (uint8_t i = 0; i < 6; ++i) {
                 Motor& motor = motors.at(i);
                 const auto& motorData = testData.motors[i];
 
-                // 写入RPDO1数据（位置+控制字）
-                motor.position.raw_target.atomicWriteValue(motorData.targetPosition);
-                motor.stateAndMode.controlData.controlWordRaw = motorData.controlWord;
+                // 写入RPDO1数据（位置+控制字）- 使用正确的标志位驱动方式
+                // 位置：转换为角度值
+                float targetAngle = static_cast<float>(motorData.targetPosition) * 180.0f / 32768.0f;
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-                // 写入RPDO2数据（速度+电流）
-                motor.velocity.raw_target_velocity_mode.atomicWriteValue(motorData.targetVelocity);
-                motor.current.raw_target.atomicWriteValue(motorData.targetCurrent);
+                // 控制字仍然使用memcpy（不需要标志位）
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &motorData.controlWord, 2);
+
+                // 写入RPDO2数据（速度+电流）- 使用正确的标志位驱动方式
+                // 速度：转换为RPM单位
+                float targetVelocityRpm = static_cast<float>(motorData.targetVelocity);
+                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                // 电流：转换为mA单位
+                float targetCurrentMa = static_cast<float>(motorData.targetCurrent);
+                motor.current.target_current.store(targetCurrentMa);
+                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
+                motor.refreshMotorData(motor.velocity);
+                motor.refreshMotorData(motor.current);
             }
-        }, "批量写入6个电机数据");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 批量写入6个电机数据 took " << duration.count() << " us\n";
+        }
 
         // 3. 等待发送线程处理并发PDO
         PDO_TEST_DEBUG_PRINT("测试2.3: 等待并发PDO处理");
 
-        TIME_IT({
+        // 等待并发PDO处理
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));  // 等待多个周期
-        }, "等待并发PDO处理");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 等待并发PDO处理 took " << duration.count() << " us\n";
+        }
 
         // 4. 输出外部验证信息
         PDO_TEST_DEBUG_PRINT("=== 多电机并发外部验证信息 ===");
@@ -555,11 +645,29 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
                 Velocity_type targetVel = 0x1000 * (testIteration * 6 + i + 1);
                 Current_type targetCur = 0x0800 * (testIteration * 6 + i + 1);
 
-                // 写入数据
-                motor.position.raw_target.atomicWriteValue(targetPos);
-                motor.stateAndMode.controlData.controlWordRaw = controlWord;
-                motor.velocity.raw_target_velocity_mode.atomicWriteValue(targetVel);
-                motor.current.raw_target.atomicWriteValue(targetCur);
+                // 写入数据（使用正确的标志位驱动方式）
+                // 位置：转换为角度值
+                float targetAngle = static_cast<float>(targetPos) * 180.0f / 32768.0f;
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                // 控制字仍然使用memcpy（不需要标志位）
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                // 速度：转换为RPM单位
+                float targetVelocityRpm = static_cast<float>(targetVel);
+                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                // 电流：转换为mA单位
+                float targetCurrentMa = static_cast<float>(targetCur);
+                motor.current.target_current.store(targetCurrentMa);
+                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
+                motor.refreshMotorData(motor.velocity);
+                motor.refreshMotorData(motor.current);
             }
 
             auto batchEnd = std::chrono::high_resolution_clock::now();
@@ -647,18 +755,45 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         Motor& testMotor = motors.at(testMotorIndex - 1);
         const auto& motorBoundaryData = boundaryData.motors[testMotorIndex - 1];
 
-        // 写入边界值数据
-        TIME_IT({
-            testMotor.position.raw_target.atomicWriteValue(motorBoundaryData.targetPosition);
-            testMotor.stateAndMode.controlData.controlWordRaw = motorBoundaryData.controlWord;
-            testMotor.velocity.raw_target_velocity_mode.atomicWriteValue(motorBoundaryData.targetVelocity);
-            testMotor.current.raw_target.atomicWriteValue(motorBoundaryData.targetCurrent);
-        }, "写入边界值数据到电机1");
+        // 写入边界值数据到电机1（使用正确的标志位驱动方式）
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            // 位置：转换为角度值
+            float targetAngle = static_cast<float>(motorBoundaryData.targetPosition) * 180.0f / 32768.0f;
+            testMotor.position.target_degree.store(targetAngle);
+            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-        // 等待处理
-        TIME_IT({
+            // 控制字仍然使用memcpy（不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &motorBoundaryData.controlWord, 2);
+
+            // 速度：转换为RPM单位
+            float targetVelocityRpm = static_cast<float>(motorBoundaryData.targetVelocity);
+            testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            // 电流：转换为mA单位
+            float targetCurrentMa = static_cast<float>(motorBoundaryData.targetCurrent);
+            testMotor.current.target_current.store(targetCurrentMa);
+            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            testMotor.refreshMotorData(testMotor.position);
+            testMotor.refreshMotorData(testMotor.velocity);
+            testMotor.refreshMotorData(testMotor.current);
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 写入边界值数据到电机1 took " << duration.count() << " us\n";
+        }
+
+        // 等待边界值PDO处理
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }, "等待边界值PDO处理");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 等待边界值PDO处理 took " << duration.count() << " us\n";
+        }
 
         // 输出边界值验证信息
         PDO_TEST_DEBUG_PRINT("=== 边界值外部验证信息 ===");
@@ -683,23 +818,49 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         // 3. 多电机边界值并发测试
         PDO_TEST_DEBUG_PRINT("测试3.3: 多电机边界值并发测试");
 
-        // 为每个电机设置交替的边界值
-        TIME_IT({
+        // 批量写入边界值数据
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             for (uint8_t i = 0; i < 6; ++i) {
                 Motor& motor = motors.at(i);
                 const auto& motorData = boundaryData.motors[i];
 
-                motor.position.raw_target.atomicWriteValue(motorData.targetPosition);
-                motor.stateAndMode.controlData.controlWordRaw = motorData.controlWord;
-                motor.velocity.raw_target_velocity_mode.atomicWriteValue(motorData.targetVelocity);
-                motor.current.raw_target.atomicWriteValue(motorData.targetCurrent);
-            }
-        }, "批量写入边界值数据");
+                // 位置：转换为角度值
+                float targetAngle = static_cast<float>(motorData.targetPosition) * 180.0f / 32768.0f;
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-        // 等待处理
-        TIME_IT({
+                // 控制字仍然使用memcpy（不需要标志位）
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &motorData.controlWord, 2);
+
+                // 速度：转换为RPM单位
+                float targetVelocityRpm = static_cast<float>(motorData.targetVelocity);
+                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                // 电流：转换为mA单位
+                float targetCurrentMa = static_cast<float>(motorData.targetCurrent);
+                motor.current.target_current.store(targetCurrentMa);
+                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
+                motor.refreshMotorData(motor.velocity);
+                motor.refreshMotorData(motor.current);
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 批量写入边界值数据 took " << duration.count() << " us\n";
+        }
+
+        // 等待边界值并发处理
+        {
+            auto start = std::chrono::high_resolution_clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }, "等待边界值并发处理");
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 等待边界值并发处理 took " << duration.count() << " us\n";
+        }
 
         // 4. 输出多电机边界值验证信息
         PDO_TEST_DEBUG_PRINT("=== 多电机边界值验证信息 ===");
@@ -723,13 +884,36 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         auto zeroData = RpdoTestDataGenerator::generateZeroTestData();
         Motor& zeroMotor = motors.at(0);  // 电机1测试零值
 
-        // 测试零值
-        TIME_IT({
-            zeroMotor.position.raw_target.atomicWriteValue(zeroData.motors[0].targetPosition);
-            zeroMotor.stateAndMode.controlData.controlWordRaw = zeroData.motors[0].controlWord;
-            zeroMotor.velocity.raw_target_velocity_mode.atomicWriteValue(zeroData.motors[0].targetVelocity);
-            zeroMotor.current.raw_target.atomicWriteValue(zeroData.motors[0].targetCurrent);
-        }, "写入零值数据");
+        // 写入零值数据（使用正确的标志位驱动方式）
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            // 位置：零值转换为角度值
+            float targetAngle = 0.0f;
+            zeroMotor.position.target_degree.store(targetAngle);
+            zeroMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 控制字仍然使用memcpy（不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(zeroMotor.stateAndMode.controlData.controlWordRaw), &zeroData.motors[0].controlWord, 2);
+
+            // 速度：零值转换为RPM单位
+            float targetVelocityRpm = 0.0f;
+            zeroMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            zeroMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            // 电流：零值转换为mA单位
+            float targetCurrentMa = 0.0f;
+            zeroMotor.current.target_current.store(targetCurrentMa);
+            zeroMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            zeroMotor.refreshMotorData(zeroMotor.position);
+            zeroMotor.refreshMotorData(zeroMotor.velocity);
+            zeroMotor.refreshMotorData(zeroMotor.current);
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            std::cout << "[PERF][TestSendThreadPDO]: 写入零值数据 took " << duration.count() << " us\n";
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
@@ -758,17 +942,42 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
 
                 if (i % 2 == 0) {
                     // 写入最大值
-                    motor.position.raw_target.atomicWriteValue(0x7FFFFFFF);
-                    motor.stateAndMode.controlData.controlWordRaw = 0xFFFF;
-                    motor.velocity.raw_target_velocity_mode.atomicWriteValue(0x7FFF);
-                    motor.current.raw_target.atomicWriteValue(0x7FFF);
+                    float targetAngle = 180.0f * (1.0f - 1.0f / (1UL << 31));
+                    motor.position.target_degree.store(targetAngle);
+                    motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                    uint16_t controlWord = 0xFFFF;
+                    std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                    float targetVelocityRpm = 14000.0f * (1.0f - 1.0f / (1UL << 15));
+                    motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                    motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                    float targetCurrentMa = 16000.0f * (1.0f - 1.0f / (1UL << 15));
+                    motor.current.target_current.store(targetCurrentMa);
+                    motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
                 } else {
                     // 写入最小值
-                    motor.position.raw_target.atomicWriteValue(0x80000000);
-                    motor.stateAndMode.controlData.controlWordRaw = 0x0000;
-                    motor.velocity.raw_target_velocity_mode.atomicWriteValue(0x8000);
-                    motor.current.raw_target.atomicWriteValue(0x8000);
+                    float targetAngle = -180.0f;
+                    motor.position.target_degree.store(targetAngle);
+                    motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                    uint16_t controlWord = 0x0000;
+                    std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                    float targetVelocityRpm = -14000.0f;
+                    motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                    motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                    float targetCurrentMa = -16000.0f;
+                    motor.current.target_current.store(targetCurrentMa);
+                    motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
                 }
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
+                motor.refreshMotorData(motor.velocity);
+                motor.refreshMotorData(motor.current);
             }
 
             auto end = std::chrono::high_resolution_clock::now();
@@ -840,17 +1049,33 @@ bool testRpdoPerformance(std::array<Motor, 6>& motors, SendThread& sendThread) {
         Motor& testMotor = motors.at(0);  // 使用电机1进行测试
 
         for (int i = 0; i < 50; ++i) {
-            Position_type testPos = 0x10000 * (i + 1);
+            // 计算物理量数值
+            float testAngle = 10.0f * (i + 1); // 角度值
             uint16_t testCtrl = 0x000F;
-            Velocity_type testVel = 0x1000 * (i + 1);
-            Current_type testCur = 0x0800 * (i + 1);
+            float testVelocityRpm = 1000.0f * (i + 1); // RPM值
+            float testCurrentMa = 1000.0f * (i + 1); // mA值
 
-            TIME_IT_RESULT({
-                testMotor.position.raw_target.atomicWriteValue(testPos);
-                testMotor.stateAndMode.controlData.controlWordRaw = testCtrl;
-                testMotor.velocity.raw_target_velocity_mode.atomicWriteValue(testVel);
-                testMotor.current.raw_target.atomicWriteValue(testCur);
-            }, "单项RPDO数据写入", uint64_t singleTime);
+            auto start = std::chrono::high_resolution_clock::now();
+            // 使用正确的标志位驱动方式写入数据
+            testMotor.position.target_degree.store(testAngle);
+            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &testCtrl, 2);
+
+            testMotor.velocity.target_rpm_velocity_mode.store(testVelocityRpm);
+            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+            testMotor.current.target_current.store(testCurrentMa);
+            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+            // 调用刷新方法进行数据转换
+            testMotor.refreshMotorData(testMotor.position);
+            testMotor.refreshMotorData(testMotor.velocity);
+            testMotor.refreshMotorData(testMotor.current);
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto singleTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            std::cout << "[PERF][TestSendThreadPDO]: 单项RPDO数据写入 took " << singleTime << " us\n";
 
             singleTestCount++;
             singleTotalTime += singleTime;
@@ -884,23 +1109,36 @@ bool testRpdoPerformance(std::array<Motor, 6>& motors, SendThread& sendThread) {
         uint64_t batchMaxTime = 0;
 
         for (int i = 0; i < 30; ++i) {
-            uint64_t batchTime;
+            auto batchStart = std::chrono::high_resolution_clock::now();
+            for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
+                Motor& motor = motors.at(motorIdx);
 
-            TIME_IT_RESULT({
-                for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
-                    Motor& motor = motors.at(motorIdx);
+                // 计算物理量数值
+                float targetAngle = 10.0f * (i * 6 + motorIdx + 1); // 角度值
+                uint16_t controlWord = 0x000F;
+                float targetVelocityRpm = 1000.0f * (i * 6 + motorIdx + 1); // RPM值
+                float targetCurrentMa = 1000.0f * (i * 6 + motorIdx + 1); // mA值
 
-                    Position_type targetPos = 0x10000 * (i * 6 + motorIdx + 1);
-                    uint16_t controlWord = 0x000F;
-                    Velocity_type targetVel = 0x1000 * (i * 6 + motorIdx + 1);
-                    Current_type targetCur = 0x0800 * (i * 6 + motorIdx + 1);
+                // 使用正确的标志位驱动方式写入数据
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-                    motor.position.raw_target.atomicWriteValue(targetPos);
-                    motor.stateAndMode.controlData.controlWordRaw = controlWord;
-                    motor.velocity.raw_target_velocity_mode.atomicWriteValue(targetVel);
-                    motor.current.raw_target.atomicWriteValue(targetCur);
-                }
-            }, "批量写入6个电机RPDO数据", batchTime);
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+
+                motor.current.target_current.store(targetCurrentMa);
+                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
+                motor.refreshMotorData(motor.velocity);
+                motor.refreshMotorData(motor.current);
+            }
+            auto batchEnd = std::chrono::high_resolution_clock::now();
+            auto batchTime = std::chrono::duration_cast<std::chrono::microseconds>(batchEnd - batchStart).count();
+            std::cout << "[PERF][TestSendThreadPDO]: 批量写入6个电机RPDO数据 took " << batchTime << " us\n";
 
             batchTestCount++;
             batchTotalTime += batchTime;
@@ -943,9 +1181,18 @@ bool testRpdoPerformance(std::array<Motor, 6>& motors, SendThread& sendThread) {
             while (std::chrono::high_resolution_clock::now() < cycleDeadline && writesInCycle < 6) {
                 Motor& motor = motors.at(writesInCycle % 6);
 
-                Position_type targetPos = 0x10000 * (i * 6 + writesInCycle + 1);
-                motor.position.raw_target.atomicWriteValue(targetPos);
-                motor.stateAndMode.controlData.controlWordRaw = 0x000F;
+                // 计算物理量数值
+                float targetAngle = 10.0f * (i * 6 + writesInCycle + 1); // 角度值
+                uint16_t controlWord = 0x000F;
+
+                // 使用正确的标志位驱动方式写入数据
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
 
                 writesInCycle++;
                 cycleTestCount++;
@@ -984,9 +1231,18 @@ bool testRpdoPerformance(std::array<Motor, 6>& motors, SendThread& sendThread) {
             for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
                 Motor& motor = motors.at(motorIdx);
 
-                Position_type targetPos = 0x10000 * (frameCount + motorIdx + 1);
-                motor.position.raw_target.atomicWriteValue(targetPos);
-                motor.stateAndMode.controlData.controlWordRaw = 0x000F;
+                // 计算物理量数值
+                float targetAngle = 10.0f * (frameCount + motorIdx + 1); // 角度值
+                uint16_t controlWord = 0x000F;
+
+                // 使用正确的标志位驱动方式写入数据
+                motor.position.target_degree.store(targetAngle);
+                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+
+                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+
+                // 调用刷新方法进行数据转换
+                motor.refreshMotorData(motor.position);
 
                 frameCount++;
 
@@ -1076,7 +1332,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
         for (int i = 0; i < 10; ++i) {
             auto testData = testDataGenerator.generateStandardTestData();
             testDataGenerator.writeTestDataToMotors(testData, motors);
-            sendThread.triggerPdoProcessing();
+            // 数据写入后会自动触发PDO处理
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
@@ -1092,7 +1348,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
             // 准备和发送PDO数据
             auto testData = testDataGenerator.generateStandardTestData();
             testDataGenerator.writeTestDataToMotors(testData, motors);
-            sendThread.triggerPdoProcessing();
+            // 数据写入后会自动触发PDO处理
 
             // 记录周期结束时间
             auto cycleEndTime = std::chrono::high_resolution_clock::now();
@@ -1126,13 +1382,14 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
         auto minDelay = *std::min_element(cycleDelays.begin(), cycleDelays.end());
         auto maxDelay = *std::max_element(cycleDelays.begin(), cycleDelays.end());
         auto avgDelay = std::accumulate(cycleDelays.begin(), cycleDelays.end(),
-                                      std::chrono::microseconds(0)) / cycleCount;
+                                      std::chrono::microseconds::zero()) / cycleCount;
+        double avgDelayCount = avgDelay.count();
 
         // 计算标准差
         double variance = 0;
         for (const auto& delay : cycleDelays) {
-            auto diff = delay - avgDelay;
-            variance += diff.count() * diff.count();
+            double diff = delay.count() - avgDelayCount;
+            variance += diff * diff;
         }
         variance /= cycleCount;
         double stdDeviation = std::sqrt(variance);
@@ -1179,8 +1436,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
             // 记录数据准备完成时间
             auto dataPreparedTime = std::chrono::high_resolution_clock::now();
 
-            // 触发PDO处理
-            sendThread.triggerPdoProcessing();
+            // 数据写入后会自动触发PDO处理
 
             // 等待传输完成（假设处理时间不超过1ms）
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1201,7 +1457,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
         auto minSendDelay = *std::min_element(sendDelays.begin(), sendDelays.end());
         auto maxSendDelay = *std::max_element(sendDelays.begin(), sendDelays.end());
         auto avgSendDelay = std::accumulate(sendDelays.begin(), sendDelays.end(),
-                                         std::chrono::microseconds(0)) / delayTestCount;
+                                         std::chrono::microseconds::zero()) / delayTestCount;
 
         PDO_TEST_DEBUG_PRINT("最小发送延迟: " << minSendDelay.count() << " us");
         PDO_TEST_DEBUG_PRINT("最大发送延迟: " << maxSendDelay.count() << " us");
@@ -1236,7 +1492,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
             // 准备并发送PDO帧
             auto testData = testDataGenerator.generateStandardTestData();
             testDataGenerator.writeTestDataToMotors(testData, motors);
-            sendThread.triggerPdoProcessing();
+            // 数据写入后会自动触发PDO处理
             frameCount++;
 
             // 控制发送频率（每帧间隔约2ms）
@@ -1388,8 +1644,8 @@ bool testSendThreadPdoFunctionality() {
         // 创建实际的串口管理器（使用真实串口）
         SerialPortManager serialManager;
 
-        // 连接串口（使用COM3作为测试串口）
-        const char* portName = "COM3";
+        // 连接串口（使用COM6作为测试串口）
+        const char* portName = "COM6";
         PDO_TEST_DEBUG_PRINT("尝试连接串口: " << portName);
 
         if (!serialManager.connect(portName)) {

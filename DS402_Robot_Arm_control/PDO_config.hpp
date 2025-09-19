@@ -239,13 +239,35 @@ inline uint16_t toSdoMotorId(uint8_t motorIndex) {
  *          - RPDO4: 0x500 + motorIndex（保留，可用于扩展功能）
  */
 inline uint32_t toRpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
-    switch (pdoIndex) {
-    case 1: return 0x200 + motorIndex;
-    case 2: return 0x300 + motorIndex;
-    case 3: return 0x400 + motorIndex;
-    case 4: return 0x500 + motorIndex;
-    default: throw std::out_of_range("Invalid RPDO index (1-4)");
+    // 添加参数验证和调试输出
+    if (motorIndex == 0 || motorIndex > 12) {
+        throw std::out_of_range("Invalid motor index (1-12)");
     }
+
+    uint32_t cobId = 0;
+    switch (pdoIndex) {
+    case 1:
+        cobId = 0x200 + motorIndex;
+        break;
+    case 2:
+        cobId = 0x300 + motorIndex;
+        break;
+    case 3:
+        cobId = 0x400 + motorIndex;
+        break;
+    case 4:
+        cobId = 0x500 + motorIndex;
+        break;
+    default:
+            throw std::out_of_range("Invalid RPDO index (1-4)");
+    }
+
+    // 验证生成的COB-ID范围
+    if (cobId < 0x200 || cobId > 0x50C) {
+        throw std::out_of_range("Generated COB-ID out of valid range");
+    }
+
+    return cobId;
 }
 
 /**

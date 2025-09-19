@@ -14,8 +14,6 @@
 #include <iostream>
 
 // 符合CLAUDE.md的测试标准：将整个测试流程包装到单一函数内
-#include "test/test_Send_Thread_SDO.hpp"
-#include "test/test_SDO_State_Machine.hpp"
 #include "test/test_Send_Thread_PDO.hpp"
 #include "Serial_Module.hpp"
 
@@ -27,6 +25,7 @@
  * - 确保测试过程只需要调用一个函数就能完成测试
  * - 提供完善的DEBUG输出，特别是在性能敏感的部分
  * - 测试涵盖各种分支条件和异常状况
+ * - 专注于PDO功能测试，不包含SDO测试
  * - 使用UTF8 with BOM编码和中文输出
  *
  * @return int 测试结果：0表示成功，非0表示失败
@@ -40,19 +39,7 @@ int runAllTests() {
     auto startTime = std::chrono::steady_clock::now();
 
     try {
-        // 测试1: 发送线程SDO功能测试
-        std::cout << "\n[TEST]: 开始发送线程SDO功能测试..." << std::endl;
-
-        bool sdoTestResult = testSendThreadSdoFunctionality();
-
-        if (sdoTestResult) {
-            std::cout << "[SUCCESS]: 发送线程SDO功能测试通过" << std::endl;
-        } else {
-            std::cout << "[ERROR]: 发送线程SDO功能测试失败" << std::endl;
-            testResult = 1;  // 设置失败标志
-        }
-
-        // 测试2: 发送线程PDO功能测试
+        // 测试1: 发送线程PDO功能测试
         std::cout << "\n[TEST]: 开始发送线程PDO功能测试..." << std::endl;
 
         bool pdoTestResult = testSendThreadPdoFunctionality();
@@ -98,8 +85,9 @@ int main() {
     std::locale::global(std::locale(""));  // 使用系统默认locale
     std::wcout.imbue(std::locale());
 
-    std::cout << "CANopen DS402机械臂驱动程序 - 测试环境" << std::endl;
+    std::cout << "CANopen DS402机械臂驱动程序 - PDO测试环境" << std::endl;
     std::cout << "基于CANopen协议的DS402子协议" << std::endl;
+    std::cout << "专注于PDO功能测试，不包含SDO测试" << std::endl;
     std::cout << "文件编码: UTF-8 with BOM" << std::endl;
     std::cout << std::endl;
 

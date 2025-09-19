@@ -33,6 +33,41 @@
 
 
 
+/**
+ * @brief 标志位驱动的数据操作流程说明
+ *
+ * CLASS_Motor采用标志位驱动的数据刷新机制，所有数据写入必须遵循以下流程：
+ *
+ * 【发送数据流程】(规划线程→发送线程→硬件)
+ * 1. 写入目标数据到目标字段（如target_current、target_degree等）
+ * 2. 设置发送刷新标志位（TARGET_DATA_SEND_NEED_REFRESH等）
+ * 3. 调用refreshMotorData()将物理量转换为编码器值和原始数据
+ * 4. 发送线程读取原始数据通过PDO发送到硬件
+ *
+ * 【接收数据流程】(硬件→接收线程→规划线程)
+ * 1. 接收线程从硬件接收原始PDO数据
+ * 2. 设置接收刷新标志位（RAW_DATA_RECEIVE_NEED_REFRESH等）
+ * 3. 调用refreshMotorData()将原始数据转换为编码器值和物理量
+ * 4. 规划线程读取转换后的实际值进行计算
+ *
+ * 标志位类型：
+ * - 发送类：TARGET_DATA_SEND_NEED_REFRESH、ENCODER_DATA_SEND_NEED_REFRESH、RAW_DATA_SEND_NEED_REFRESH
+ * - 接收类：ACTUAL_DATA_RECEIVE_NEED_REFRESH、ENCODER_DATA_RECEIVE_NEED_REFRESH、RAW_DATA_RECEIVE_NEED_REFRESH
+ *
+ * 重要：不设置标志位直接写入数据，数据转换不会发生，系统无法正常工作。
+ *
+ * 发送示例：
+ *   motor.current.target_current.store(100.0f);
+ *   motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH);
+ *   motor.refreshMotorData(motor.current);
+ *
+ * 接收示例：
+ *   motor.current.raw_actual.atomicWriteValue(received_raw_data);
+ *   motor.current.flags_.fetch_or(MotorCurrent::Flags::RAW_DATA_RECEIVE_NEED_REFRESH);
+ *   motor.refreshMotorData(motor.current);
+ */
+
+
 #ifndef CLASS_MOTOR_HPP
 #define CLASS_MOTOR_HPP
 
@@ -283,14 +318,14 @@ struct StateAndMode
 
     // DS402: 控制字(0x6040)、状态字(0x6041)通常各2字节
     // 运行模式(0x6060)通常1字节，错误码(0x603F)通常2字节
-    volatile struct {
-        volatile uint8_t controlWordRaw[2];     /// 控制字（原始2字节）>> 发送 0x6040
-        volatile uint8_t statusWordRaw[2];      /// 状态字（原始2字节）<< 接收 0x6041
-    }controlData;
-    volatile struct { 
-        volatile uint8_t modeOfOperationRaw[1]; /// 运行模式（原始1字节）>> 发送  0x6060
-        volatile uint8_t errorCodeRaw[2];       /// 电机错误代码（原始2字节）<< 接收  0x603F
-    }modeData;
+    struct {
+        uint8_t controlWordRaw[2];     /// 控制字（原始2字节）>> 发送 0x6040
+        uint8_t statusWordRaw[2];      /// 状态字（原始2字节）<< 接收 0x6041
+    } volatile controlData;
+    struct {
+        uint8_t modeOfOperationRaw[1]; /// 运行模式（原始1字节）>> 发送  0x6060
+        uint8_t errorCodeRaw[2];       /// 电机错误代码（原始2字节）<< 接收  0x603F
+    } volatile modeData;
 
     const uint16_t controlWordIndex = OD_CONTROL_WORD;      // 0x6040
     const uint16_t statusWordIndex = OD_STATUS_WORD;       // 0x6041
