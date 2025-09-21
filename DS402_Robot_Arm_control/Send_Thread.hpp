@@ -39,7 +39,7 @@
 // #define ENABLE_DETAILED_TIMEOUT_HANDLING
 
 //调试输出开关（修改后面的值）
-#define ENABLE_DEBUG_OUTPUT true
+#define ENABLE_DEBUG_OUTPUT false
 
 
 // 调试输出控制（零开销宏）
@@ -746,6 +746,14 @@ public:
     uint32_t getErrorCount() const {
         return errorCount_.load(std::memory_order_relaxed);
     }
+
+    /**
+     * @brief 获取全局帧计数器
+     * @return 已发送的帧总数
+     */
+    uint64_t getGlobalFrameCounter() const {
+        return globalFrameCounter_.load(std::memory_order_relaxed);
+    }
     
     /**
      * @brief 获取错误消息
@@ -1038,7 +1046,7 @@ public:
                 DEBUG_PRINT("[ERROR][SendThread::buildAndSendPdoFrames]: 发送前验证失败 - 非法帧ID: 0x"
                           << std::hex << frame.frameID << std::dec);
                 validFrameCount_ = 0; // 取消所有发送
-                return 0;
+                 return 0;
             }
 
             // 验证DLC

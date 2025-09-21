@@ -33,7 +33,7 @@
 #define PDO_TEST_DEBUG_OUTPUT
 
 // 启用Send_Thread调试输出
-#define ENABLE_DEBUG_OUTPUT true
+#define ENABLE_DEBUG_OUTPUT false
 
 #include <iostream>
 #include <thread>
@@ -371,13 +371,32 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
             std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO1数据到电机 took " << duration.count() << " us\n";
         }
 
-        // 等待发送线程处理PDO（考虑2ms周期）
+        // 等待发送线程处理PDO（基于帧计数的性能统计）
         {
+            // 预统计要发送的帧数量：RPDO1需要发送1帧
+            const uint64_t expectedFrames = 1;
+            uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
+
             auto start = std::chrono::high_resolution_clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // 等待至少2个周期
+
+            // 等待直到发送了预期数量的帧（最多等待2ms，超时则退出）
+            auto startTime = start;
+            const auto timeout = std::chrono::milliseconds(2);
+            while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
+                auto now = std::chrono::high_resolution_clock::now();
+                if (now - startTime > timeout) {
+                    PDO_TEST_DEBUG_PRINT("警告：PDO帧发送超时");
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
+            }
+
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 等待PDO处理 took " << duration.count() << " us\n";
+            uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
+
+            std::cout << "[PERF][TestSendThreadPDO]: PDO处理(帧计数法) took " << duration.count() << " us, "
+                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
         }
 
         // 记录测试数据供外部验证
@@ -421,13 +440,32 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
             std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO2数据到电机 took " << duration.count() << " us\n";
         }
 
-        // 等待发送线程处理PDO
+        // 等待发送线程处理PDO（基于帧计数的性能统计）
         {
+            // 预统计要发送的帧数量：RPDO2需要发送1帧
+            const uint64_t expectedFrames = 1;
+            uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
+
             auto start = std::chrono::high_resolution_clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // 等待至少2个周期
+
+            // 等待直到发送了预期数量的帧（最多等待2ms，超时则退出）
+            auto startTime = start;
+            const auto timeout = std::chrono::milliseconds(2);
+            while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
+                auto now = std::chrono::high_resolution_clock::now();
+                if (now - startTime > timeout) {
+                    PDO_TEST_DEBUG_PRINT("警告：PDO帧发送超时");
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
+            }
+
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 等待PDO处理 took " << duration.count() << " us\n";
+            uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
+
+            std::cout << "[PERF][TestSendThreadPDO]: PDO处理(帧计数法) took " << duration.count() << " us, "
+                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
         }
 
         // 记录测试数据供外部验证
@@ -590,13 +628,32 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
         // 3. 等待发送线程处理并发PDO
         PDO_TEST_DEBUG_PRINT("测试2.3: 等待并发PDO处理");
 
-        // 等待并发PDO处理
+        // 等待并发PDO处理（基于帧计数的性能统计）
         {
+            // 预统计要发送的帧数量：6个电机 × 2帧RPDO = 12帧
+            const uint64_t expectedFrames = 12;
+            uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
+
             auto start = std::chrono::high_resolution_clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));  // 等待多个周期
+
+            // 等待直到发送了预期数量的帧（最多等待5ms，超时则退出）
+            auto startTime = start;
+            const auto timeout = std::chrono::milliseconds(5);
+            while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
+                auto now = std::chrono::high_resolution_clock::now();
+                if (now - startTime > timeout) {
+                    PDO_TEST_DEBUG_PRINT("警告：并发PDO帧发送超时");
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
+            }
+
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 等待并发PDO处理 took " << duration.count() << " us\n";
+            uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
+
+            std::cout << "[PERF][TestSendThreadPDO]: 并发PDO处理(帧计数法) took " << duration.count() << " us, "
+                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
         }
 
         // 4. 输出外部验证信息
@@ -1644,8 +1701,8 @@ bool testSendThreadPdoFunctionality() {
         // 创建实际的串口管理器（使用真实串口）
         SerialPortManager serialManager;
 
-        // 连接串口（使用COM6作为测试串口）
-        const char* portName = "COM6";
+        // 连接串口（使用COM5作为测试串口）
+        const char* portName = "COM5";
         PDO_TEST_DEBUG_PRINT("尝试连接串口: " << portName);
 
         if (!serialManager.connect(portName)) {

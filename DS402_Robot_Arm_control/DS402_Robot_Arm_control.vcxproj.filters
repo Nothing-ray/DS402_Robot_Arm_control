@@ -69,6 +69,9 @@
     <ClInclude Include="test\test_Serial_Module.hpp">
       <Filter>头文件\测试</Filter>
     </ClInclude>
+    <ClInclude Include="test\test_Send_Thread_PDO.hpp">
+      <Filter>头文件\测试</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
