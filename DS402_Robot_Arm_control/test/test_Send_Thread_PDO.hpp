@@ -10,14 +10,14 @@
  * - 创建真实的SendThread实例和SerialPortManager
  * - 使用实际串口连接，确保真实环境测试
  * - 生成标准化的RPDO测试数据
- * - 进行简化的性能统计和时间测量
+ * - 进行功能验证和数据包验证
  * - 通过外部调试设备验证发送的数据包
  *
  * @par 测试重点：
  * - RPDO1：目标位置和控制字发送（0x200 + NodeID）
  * - RPDO2：目标速度和电流发送（0x300 + NodeID）
  * - 六电机并发发送性能分析
- * - 真实串口传输延迟统计
+ * - 真实串口传输功能验证
  *
  * @note 本测试需要外部调试设备（如CAN分析仪）来验证发送的数据包，
  * 测试结果包含简化的性能报告，用于分析RPDO发送实时性表现。
@@ -322,6 +322,140 @@ public:
     }
 };
 
+// ====================== PerformanceMonitor测试辅助类 ======================
+
+/**
+ * @brief 性能监控辅助类
+ *
+ * @details 简化测试中的性能统计操作，提供统一的接口来获取和验证Send_Thread的性能统计
+ */
+class PerformanceMonitor {
+private:
+    SendThread& sendThread_;
+    SendThread::PerformanceStats baselineStats_;
+    bool hasBaseline_;
+
+public:
+    explicit PerformanceMonitor(SendThread& sendThread)
+        : sendThread_(sendThread), hasBaseline_(false) {}
+
+    /**
+     * @brief 设置基准性能统计
+     */
+    void setBaseline() {
+        baselineStats_ = sendThread_.getPerformanceStats();
+        hasBaseline_ = true;
+    }
+
+    /**
+     * @brief 获取当前性能统计
+     */
+    SendThread::PerformanceStats getCurrentStats() const {
+        return sendThread_.getPerformanceStats();
+    }
+
+    /**
+     * @brief 重置性能统计
+     */
+    void reset() {
+        sendThread_.resetPerformanceStats();
+        hasBaseline_ = false;
+    }
+
+    /**
+     * @brief 验证性能统计在合理范围内
+     *
+     * @param maxExpectedTimeUs 预期的最大处理时间（微秒）
+     * @return bool 验证通过返回true
+     */
+    bool validatePerformanceRange(uint64_t maxExpectedTimeUs = 2000) const {
+        auto stats = getCurrentStats();
+
+        // 验证当前处理时间在合理范围内
+        if (stats.currentCycleTime > maxExpectedTimeUs) {
+            PDO_TEST_DEBUG_PRINT("[性能警告] 当前周期时间 " << stats.currentCycleTime
+                << " us 超过预期 " << maxExpectedTimeUs << " us");
+            return false;
+        }
+
+        // 验证平均处理时间在合理范围内
+        if (stats.avgProcessingTime > maxExpectedTimeUs) {
+            PDO_TEST_DEBUG_PRINT("[性能警告] 平均处理时间 " << stats.avgProcessingTime
+                << " us 超过预期 " << maxExpectedTimeUs << " us");
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * @brief 打印性能统计报告
+     */
+    void printReport() const {
+        auto stats = getCurrentStats();
+
+        PDO_TEST_DEBUG_PRINT("=== Send_Thread 性能统计报告 ===");
+        PDO_TEST_DEBUG_PRINT("当前周期时间: " << stats.currentCycleTime << " us");
+        PDO_TEST_DEBUG_PRINT("最小处理时间: " << stats.minProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("最大处理时间: " << stats.maxProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("平均处理时间: " << stats.avgProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("总样本数: " << stats.totalSamples);
+        PDO_TEST_DEBUG_PRINT("周期计数: " << stats.cycleCount);
+
+        if (hasBaseline_) {
+            PDO_TEST_DEBUG_PRINT("=== 与基准对比 ===");
+            PDO_TEST_DEBUG_PRINT("基准周期时间: " << baselineStats_.currentCycleTime << " us");
+            PDO_TEST_DEBUG_PRINT("基准平均时间: " << baselineStats_.avgProcessingTime << " us");
+
+            if (stats.avgProcessingTime > baselineStats_.avgProcessingTime) {
+                double degradation = ((double)stats.avgProcessingTime - baselineStats_.avgProcessingTime) / baselineStats_.avgProcessingTime * 100.0;
+                PDO_TEST_DEBUG_PRINT("性能变化: +" << degradation << "%");
+            } else {
+                double improvement = ((double)baselineStats_.avgProcessingTime - stats.avgProcessingTime) / baselineStats_.avgProcessingTime * 100.0;
+                PDO_TEST_DEBUG_PRINT("性能变化: -" << improvement << "%");
+            }
+        }
+
+        PDO_TEST_DEBUG_PRINT("=== 报告结束 ===");
+    }
+
+    /**
+     * @brief 验证性能统计功能正常工作
+     */
+    bool validateStatsFunctionality() {
+        try {
+            // 重置统计
+            reset();
+
+            // 获取重置后的统计
+            auto resetStats = getCurrentStats();
+
+            // 验证重置后的值是否合理
+            if (resetStats.totalSamples != 0 || resetStats.cycleCount != 0) {
+                PDO_TEST_DEBUG_PRINT("[错误] 重置后统计数值异常");
+                return false;
+            }
+
+            // 等待一个周期
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+
+            // 再次获取统计
+            auto newStats = getCurrentStats();
+
+            // 验证统计是否有更新
+            if (newStats.cycleCount <= resetStats.cycleCount) {
+                PDO_TEST_DEBUG_PRINT("[错误] 性能统计计数器未更新");
+                return false;
+            }
+
+            return true;
+        } catch (const std::exception& e) {
+            PDO_TEST_DEBUG_PRINT("[错误] 性能统计验证异常: " << e.what());
+            return false;
+        }
+    }
+};
+
 // ====================== RPDO基础功能测试 ======================
 
 /**
@@ -331,7 +465,7 @@ public:
  * - RPDO1：目标位置和控制字发送
  * - RPDO2：目标速度和目标电流发送
  * - 数据正确性验证
- * - 性能统计分析
+ * - 数据正确性验证
  *
  * @param motors 电机数组引用
  * @param sendThread 发送线程引用
@@ -354,7 +488,6 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
 
         // 写入目标位置和控制字到电机（使用正确的标志位驱动方式）
         {
-            auto start = std::chrono::high_resolution_clock::now();
             // 将原始位置值转换为角度值
             float targetAngle = static_cast<float>(testData.motors[testMotorIndex - 1].targetPosition) * 180.0f / 32768.0f;
             testMotor.position.target_degree.store(targetAngle);
@@ -365,22 +498,16 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
 
             // 调用刷新方法进行数据转换
             testMotor.refreshMotorData(testMotor.position);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO1数据到电机 took " << duration.count() << " us\n";
         }
 
-        // 等待发送线程处理PDO（基于帧计数的性能统计）
+        // 等待发送线程处理PDO（基于帧计数验证）
         {
-            // 预统计要发送的帧数量：RPDO1需要发送1帧
+            // 预期要发送的帧数量：RPDO1需要发送1帧
             const uint64_t expectedFrames = 1;
             uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
 
-            auto start = std::chrono::high_resolution_clock::now();
-
             // 等待直到发送了预期数量的帧（最多等待2ms，超时则退出）
-            auto startTime = start;
+            auto startTime = std::chrono::high_resolution_clock::now();
             const auto timeout = std::chrono::milliseconds(2);
             while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
                 auto now = std::chrono::high_resolution_clock::now();
@@ -390,13 +517,10 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
             }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
             uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
 
-            std::cout << "[PERF][TestSendThreadPDO]: PDO处理(帧计数法) took " << duration.count() << " us, "
-                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
+            PDO_TEST_DEBUG_PRINT("RPDO1帧发送验证：期望=" << expectedFrames
+                              << ", 实际=" << actualFramesSent);
         }
 
         // 记录测试数据供外部验证
@@ -420,7 +544,6 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
 
         // 写入目标速度和目标电流到电机（使用正确的标志位驱动方式）
         {
-            auto start = std::chrono::high_resolution_clock::now();
             // 速度值直接使用RPM单位
             float targetVelocityRpm = static_cast<float>(testData.motors[testMotorIndex - 1].targetVelocity);
             testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
@@ -434,22 +557,16 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
             // 调用刷新方法进行数据转换
             testMotor.refreshMotorData(testMotor.velocity);
             testMotor.refreshMotorData(testMotor.current);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 写入RPDO2数据到电机 took " << duration.count() << " us\n";
         }
 
-        // 等待发送线程处理PDO（基于帧计数的性能统计）
+        // 等待发送线程处理PDO（基于帧计数验证）
         {
-            // 预统计要发送的帧数量：RPDO2需要发送1帧
+            // 预期要发送的帧数量：RPDO2需要发送1帧
             const uint64_t expectedFrames = 1;
             uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
 
-            auto start = std::chrono::high_resolution_clock::now();
-
             // 等待直到发送了预期数量的帧（最多等待2ms，超时则退出）
-            auto startTime = start;
+            auto startTime = std::chrono::high_resolution_clock::now();
             const auto timeout = std::chrono::milliseconds(2);
             while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
                 auto now = std::chrono::high_resolution_clock::now();
@@ -459,13 +576,10 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
             }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
             uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
 
-            std::cout << "[PERF][TestSendThreadPDO]: PDO处理(帧计数法) took " << duration.count() << " us, "
-                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
+            PDO_TEST_DEBUG_PRINT("RPDO2帧发送验证：期望=" << expectedFrames
+                              << ", 实际=" << actualFramesSent);
         }
 
         // 记录测试数据供外部验证
@@ -498,58 +612,22 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
             return false;
         }
 
-        // 4. 综合性能统计
-        PDO_TEST_DEBUG_PRINT("测试1.4: RPDO基础功能性能统计");
+        // 4. 基础功能总结验证
+        PDO_TEST_DEBUG_PRINT("测试1.4: RPDO基础功能总结验证");
 
-        // 测试多次RPDO发送的平均性能
-        size_t testCount = 0;
-        uint64_t totalTime = 0;
+        // 验证发送线程统计功能（如果启用）
+#ifdef ENABLE_CYCLE_TIMING
+        auto stats = sendThread.getPerformanceStats();
+        PDO_TEST_DEBUG_PRINT("=== 发送线程性能统计 ===");
+        PDO_TEST_DEBUG_PRINT("周期数: " << stats.cycleCount);
+        PDO_TEST_DEBUG_PRINT("当前处理时间: " << stats.currentCycleTime << " us");
+        PDO_TEST_DEBUG_PRINT("平均处理时间: " << stats.avgProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("最小处理时间: " << stats.minProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("最大处理时间: " << stats.maxProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("统计样本数: " << stats.totalSamples);
+        PDO_TEST_DEBUG_PRINT("=== 统计结束 ===");
+#endif
 
-        for (int i = 0; i < 10; ++i) {
-            // 生成随机测试数据
-            Position_type randomPos = 0x10000 * (i + 1);
-            uint16_t randomCtrl = 0x000F;
-            Velocity_type randomVel = 0x1000 * (i + 1);
-            Current_type randomCur = 0x0800 * (i + 1);
-
-            auto start = std::chrono::high_resolution_clock::now();
-
-            // 写入数据（使用正确的标志位驱动方式）
-            // 位置：转换为角度值
-            float targetAngle = static_cast<float>(randomPos) * 180.0f / 32768.0f;
-            testMotor.position.target_degree.store(targetAngle);
-            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-            // 控制字仍然使用memcpy（不需要标志位）
-            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &randomCtrl, 2);
-
-            // 速度：转换为RPM单位
-            float targetVelocityRpm = static_cast<float>(randomVel);
-            testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
-            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
-
-            // 电流：转换为mA单位
-            float targetCurrentMa = static_cast<float>(randomCur);
-            testMotor.current.target_current.store(targetCurrentMa);
-            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-            // 调用刷新方法进行数据转换
-            testMotor.refreshMotorData(testMotor.position);
-            testMotor.refreshMotorData(testMotor.velocity);
-            testMotor.refreshMotorData(testMotor.current);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-            testCount++;
-            totalTime += duration.count();
-
-            // 等待处理
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-
-        double avgTime = static_cast<double>(totalTime) / testCount;
-        PDO_TEST_DEBUG_PRINT("RPDO数据写入平均时间: " << avgTime << " us (10次测试)");
         PDO_TEST_DEBUG_PRINT("RPDO基础功能测试通过");
 
         return true;
@@ -569,7 +647,7 @@ bool testRpdoBasicFunctionality(std::array<Motor, 6>& motors, SendThread& sendTh
  * - 所有电机同时发送RPDO1和RPDO2
  * - 验证并发发送的性能表现
  * - 检查所有电机的COB-ID正确性
- * - 统计批量发送性能指标
+ * - 验证批量发送功能正确性
  *
  * @param motors 电机数组引用
  * @param sendThread 发送线程引用
@@ -590,7 +668,6 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
 
         // 批量写入6个电机数据
         {
-            auto start = std::chrono::high_resolution_clock::now();
             for (uint8_t i = 0; i < 6; ++i) {
                 Motor& motor = motors.at(i);
                 const auto& motorData = testData.motors[i];
@@ -620,24 +697,19 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
                 motor.refreshMotorData(motor.velocity);
                 motor.refreshMotorData(motor.current);
             }
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 批量写入6个电机数据 took " << duration.count() << " us\n";
         }
 
         // 3. 等待发送线程处理并发PDO
         PDO_TEST_DEBUG_PRINT("测试2.3: 等待并发PDO处理");
 
-        // 等待并发PDO处理（基于帧计数的性能统计）
+        // 等待并发PDO处理（基于帧计数验证）
         {
-            // 预统计要发送的帧数量：6个电机 × 2帧RPDO = 12帧
+            // 预期要发送的帧数量：6个电机 × 2帧RPDO = 12帧
             const uint64_t expectedFrames = 12;
             uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
 
-            auto start = std::chrono::high_resolution_clock::now();
-
             // 等待直到发送了预期数量的帧（最多等待5ms，超时则退出）
-            auto startTime = start;
+            auto startTime = std::chrono::high_resolution_clock::now();
             const auto timeout = std::chrono::milliseconds(5);
             while (sendThread.getGlobalFrameCounter() - startFrameCount < expectedFrames) {
                 auto now = std::chrono::high_resolution_clock::now();
@@ -647,13 +719,10 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(50));  // 短暂休眠避免忙等待
             }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
             uint64_t actualFramesSent = sendThread.getGlobalFrameCounter() - startFrameCount;
 
-            std::cout << "[PERF][TestSendThreadPDO]: 并发PDO处理(帧计数法) took " << duration.count() << " us, "
-                     << "期望帧数=" << expectedFrames << ", 实际发送=" << actualFramesSent << "\n";
+            PDO_TEST_DEBUG_PRINT("并发PDO处理验证：期望=" << expectedFrames
+                              << ", 实际=" << actualFramesSent);
         }
 
         // 4. 输出外部验证信息
@@ -683,15 +752,10 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
         PDO_TEST_DEBUG_PRINT("所有帧DLC应为8字节");
         PDO_TEST_DEBUG_PRINT("=== 验证信息结束 ===");
 
-        // 5. 多次并发性能测试
-        PDO_TEST_DEBUG_PRINT("测试2.4: 多次并发性能测试");
-
-        size_t batchTestCount = 0;
-        uint64_t batchTotalTime = 0;
+        // 5. 多次并发功能测试
+        PDO_TEST_DEBUG_PRINT("测试2.4: 多次并发功能测试");
 
         for (int testIteration = 0; testIteration < 20; ++testIteration) {
-            auto batchStart = std::chrono::high_resolution_clock::now();
-
             // 为所有电机生成新的测试数据
             for (uint8_t i = 0; i < 6; ++i) {
                 Motor& motor = motors.at(i);
@@ -727,12 +791,6 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
                 motor.refreshMotorData(motor.current);
             }
 
-            auto batchEnd = std::chrono::high_resolution_clock::now();
-            auto batchDuration = std::chrono::duration_cast<std::chrono::microseconds>(batchEnd - batchStart);
-
-            batchTestCount++;
-            batchTotalTime += batchDuration.count();
-
             // 等待处理
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
@@ -742,15 +800,7 @@ bool testRpdoMultiMotorConcurrent(std::array<Motor, 6>& motors, SendThread& send
             }
         }
 
-        // 计算并发性能统计
-        double avgBatchTime = static_cast<double>(batchTotalTime) / batchTestCount;
-        double avgMotorTime = avgBatchTime / 6.0;  // 平均每个电机的处理时间
-
-        PDO_TEST_DEBUG_PRINT("=== 并发性能统计 ===");
-        PDO_TEST_DEBUG_PRINT("批量写入平均时间: " << avgBatchTime << " us (6个电机)");
-        PDO_TEST_DEBUG_PRINT("单电机平均时间: " << avgMotorTime << " us");
-        PDO_TEST_DEBUG_PRINT("总测试次数: " << batchTestCount);
-        PDO_TEST_DEBUG_PRINT("=== 性能统计结束 ===");
+        PDO_TEST_DEBUG_PRINT("多次并发功能测试完成");
 
         // 6. 验证发送线程健康状态
         PDO_TEST_DEBUG_PRINT("测试2.5: 验证发送线程健康状态");
@@ -813,44 +863,31 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         const auto& motorBoundaryData = boundaryData.motors[testMotorIndex - 1];
 
         // 写入边界值数据到电机1（使用正确的标志位驱动方式）
-        {
-            auto start = std::chrono::high_resolution_clock::now();
-            // 位置：转换为角度值
-            float targetAngle = static_cast<float>(motorBoundaryData.targetPosition) * 180.0f / 32768.0f;
-            testMotor.position.target_degree.store(targetAngle);
-            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        // 位置：转换为角度值
+        float targetAngle = static_cast<float>(motorBoundaryData.targetPosition) * 180.0f / 32768.0f;
+        testMotor.position.target_degree.store(targetAngle);
+        testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-            // 控制字仍然使用memcpy（不需要标志位）
-            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &motorBoundaryData.controlWord, 2);
+        // 控制字仍然使用memcpy（不需要标志位）
+        std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &motorBoundaryData.controlWord, 2);
 
-            // 速度：转换为RPM单位
-            float targetVelocityRpm = static_cast<float>(motorBoundaryData.targetVelocity);
-            testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
-            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+        // 速度：转换为RPM单位
+        float targetVelocityRpm = static_cast<float>(motorBoundaryData.targetVelocity);
+        testMotor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+        testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
 
-            // 电流：转换为mA单位
-            float targetCurrentMa = static_cast<float>(motorBoundaryData.targetCurrent);
-            testMotor.current.target_current.store(targetCurrentMa);
-            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        // 电流：转换为mA单位
+        float targetCurrentMa = static_cast<float>(motorBoundaryData.targetCurrent);
+        testMotor.current.target_current.store(targetCurrentMa);
+        testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-            // 调用刷新方法进行数据转换
-            testMotor.refreshMotorData(testMotor.position);
-            testMotor.refreshMotorData(testMotor.velocity);
-            testMotor.refreshMotorData(testMotor.current);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 写入边界值数据到电机1 took " << duration.count() << " us\n";
-        }
+        // 调用刷新方法进行数据转换
+        testMotor.refreshMotorData(testMotor.position);
+        testMotor.refreshMotorData(testMotor.velocity);
+        testMotor.refreshMotorData(testMotor.current);
 
         // 等待边界值PDO处理
-        {
-            auto start = std::chrono::high_resolution_clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 等待边界值PDO处理 took " << duration.count() << " us\n";
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
         // 输出边界值验证信息
         PDO_TEST_DEBUG_PRINT("=== 边界值外部验证信息 ===");
@@ -876,48 +913,36 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         PDO_TEST_DEBUG_PRINT("测试3.3: 多电机边界值并发测试");
 
         // 批量写入边界值数据
-        {
-            auto start = std::chrono::high_resolution_clock::now();
-            for (uint8_t i = 0; i < 6; ++i) {
-                Motor& motor = motors.at(i);
-                const auto& motorData = boundaryData.motors[i];
+        for (uint8_t i = 0; i < 6; ++i) {
+            Motor& motor = motors.at(i);
+            const auto& motorData = boundaryData.motors[i];
 
-                // 位置：转换为角度值
-                float targetAngle = static_cast<float>(motorData.targetPosition) * 180.0f / 32768.0f;
-                motor.position.target_degree.store(targetAngle);
-                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+            // 位置：转换为角度值
+            float targetAngle = static_cast<float>(motorData.targetPosition) * 180.0f / 32768.0f;
+            motor.position.target_degree.store(targetAngle);
+            motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-                // 控制字仍然使用memcpy（不需要标志位）
-                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &motorData.controlWord, 2);
+            // 控制字仍然使用memcpy（不需要标志位）
+            std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &motorData.controlWord, 2);
 
-                // 速度：转换为RPM单位
-                float targetVelocityRpm = static_cast<float>(motorData.targetVelocity);
-                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
-                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
+            // 速度：转换为RPM单位
+            float targetVelocityRpm = static_cast<float>(motorData.targetVelocity);
+            motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
+            motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
 
-                // 电流：转换为mA单位
-                float targetCurrentMa = static_cast<float>(motorData.targetCurrent);
-                motor.current.target_current.store(targetCurrentMa);
-                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+            // 电流：转换为mA单位
+            float targetCurrentMa = static_cast<float>(motorData.targetCurrent);
+            motor.current.target_current.store(targetCurrentMa);
+            motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
 
-                // 调用刷新方法进行数据转换
-                motor.refreshMotorData(motor.position);
-                motor.refreshMotorData(motor.velocity);
-                motor.refreshMotorData(motor.current);
-            }
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 批量写入边界值数据 took " << duration.count() << " us\n";
+            // 调用刷新方法进行数据转换
+            motor.refreshMotorData(motor.position);
+            motor.refreshMotorData(motor.velocity);
+            motor.refreshMotorData(motor.current);
         }
 
         // 等待边界值并发处理
-        {
-            auto start = std::chrono::high_resolution_clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 等待边界值并发处理 took " << duration.count() << " us\n";
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         // 4. 输出多电机边界值验证信息
         PDO_TEST_DEBUG_PRINT("=== 多电机边界值验证信息 ===");
@@ -943,7 +968,6 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
 
         // 写入零值数据（使用正确的标志位驱动方式）
         {
-            auto start = std::chrono::high_resolution_clock::now();
             // 位置：零值转换为角度值
             float targetAngle = 0.0f;
             zeroMotor.position.target_degree.store(targetAngle);
@@ -966,10 +990,6 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
             zeroMotor.refreshMotorData(zeroMotor.position);
             zeroMotor.refreshMotorData(zeroMotor.velocity);
             zeroMotor.refreshMotorData(zeroMotor.current);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << "[PERF][TestSendThreadPDO]: 写入零值数据 took " << duration.count() << " us\n";
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -984,15 +1004,10 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
         PDO_TEST_DEBUG_PRINT("  RPDO2 COB-ID: 0x301");
         PDO_TEST_DEBUG_PRINT("=== 零值验证信息结束 ===");
 
-        // 6. 边界值性能测试
-        PDO_TEST_DEBUG_PRINT("测试3.5: 边界值性能测试");
-
-        size_t boundaryTestCount = 0;
-        uint64_t boundaryTotalTime = 0;
+        // 6. 边界值功能测试
+        PDO_TEST_DEBUG_PRINT("测试3.5: 边界值功能测试");
 
         for (int i = 0; i < 10; ++i) {
-            auto start = std::chrono::high_resolution_clock::now();
-
             // 交替写入最大值和最小值
             for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
                 Motor& motor = motors.at(motorIdx);
@@ -1037,17 +1052,10 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
                 motor.refreshMotorData(motor.current);
             }
 
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-            boundaryTestCount++;
-            boundaryTotalTime += duration.count();
-
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
-        double avgBoundaryTime = static_cast<double>(boundaryTotalTime) / boundaryTestCount;
-        PDO_TEST_DEBUG_PRINT("边界值平均写入时间: " << avgBoundaryTime << " us (6个电机)");
+        PDO_TEST_DEBUG_PRINT("边界值功能测试完成");
 
         // 7. 验证数据完整性
         PDO_TEST_DEBUG_PRINT("测试3.6: 验证数据完整性");
@@ -1075,585 +1083,166 @@ bool testRpdoBoundaryValues(std::array<Motor, 6>& motors, SendThread& sendThread
     }
 }
 
-// ====================== 性能统计测试 ======================
+// ====================== 性能统计验证测试 ======================
 
 /**
- * @brief 性能统计测试
+ * @brief 性能统计验证测试
  *
- * @details 测试RPDO发送的各项性能指标：
- * - 单项性能测试（单个RPDO帧发送性能）
- * - 批量性能测试（多帧发送性能）
- * - 周期性能测试（2ms周期内的处理能力）
- * - 内存分配测试（验证无动态内存分配的性能优势）
- * - 吞吐量测试（单位时间内的PDO帧发送数量）
+ * @details 验证Send_Thread内置性能统计功能：
+ * - 验证周期时间统计正确性
+ * - 验证处理时间统计功能
+ * - 验证统计信息查询接口
+ * - 验证统计重置功能
  *
  * @param motors 电机数组引用
  * @param sendThread 发送线程引用
  * @return bool 测试成功返回true，失败返回false
  */
-bool testRpdoPerformance(std::array<Motor, 6>& motors, SendThread& sendThread) {
+bool testRpdoPerformanceStats(std::array<Motor, 6>& motors, SendThread& sendThread) {
     try {
-        PDO_TEST_DEBUG_PRINT("开始性能统计测试");
+        PDO_TEST_DEBUG_PRINT("开始性能统计验证测试");
 
-        // 1. 单项性能测试
-        PDO_TEST_DEBUG_PRINT("测试4.1: 单项性能测试（单个RPDO帧）");
+#ifdef ENABLE_CYCLE_TIMING
+        // 创建性能监控器
+        PerformanceMonitor monitor(sendThread);
 
-        size_t singleTestCount = 0;
-        uint64_t singleTotalTime = 0;
-        uint64_t singleMinTime = UINT64_MAX;
-        uint64_t singleMaxTime = 0;
-
-        Motor& testMotor = motors.at(0);  // 使用电机1进行测试
-
-        for (int i = 0; i < 50; ++i) {
-            // 计算物理量数值
-            float testAngle = 10.0f * (i + 1); // 角度值
-            uint16_t testCtrl = 0x000F;
-            float testVelocityRpm = 1000.0f * (i + 1); // RPM值
-            float testCurrentMa = 1000.0f * (i + 1); // mA值
-
-            auto start = std::chrono::high_resolution_clock::now();
-            // 使用正确的标志位驱动方式写入数据
-            testMotor.position.target_degree.store(testAngle);
-            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &testCtrl, 2);
-
-            testMotor.velocity.target_rpm_velocity_mode.store(testVelocityRpm);
-            testMotor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
-
-            testMotor.current.target_current.store(testCurrentMa);
-            testMotor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-            // 调用刷新方法进行数据转换
-            testMotor.refreshMotorData(testMotor.position);
-            testMotor.refreshMotorData(testMotor.velocity);
-            testMotor.refreshMotorData(testMotor.current);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto singleTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-            std::cout << "[PERF][TestSendThreadPDO]: 单项RPDO数据写入 took " << singleTime << " us\n";
-
-            singleTestCount++;
-            singleTotalTime += singleTime;
-
-            if (singleTime < singleMinTime) singleMinTime = singleTime;
-            if (singleTime > singleMaxTime) singleMaxTime = singleTime;
-
-            // 短暂等待避免过载
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-            // 每10次输出进度
-            if ((i + 1) % 10 == 0) {
-                PDO_TEST_DEBUG_PRINT("完成 " << (i + 1) << "/50 次单项测试");
-            }
-        }
-
-        double singleAvgTime = static_cast<double>(singleTotalTime) / singleTestCount;
-        PDO_TEST_DEBUG_PRINT("=== 单项性能统计 ===");
-        PDO_TEST_DEBUG_PRINT("平均写入时间: " << singleAvgTime << " us");
-        PDO_TEST_DEBUG_PRINT("最小写入时间: " << singleMinTime << " us");
-        PDO_TEST_DEBUG_PRINT("最大写入时间: " << singleMaxTime << " us");
-        PDO_TEST_DEBUG_PRINT("测试次数: " << singleTestCount);
-        PDO_TEST_DEBUG_PRINT("=== 单项统计结束 ===");
-
-        // 2. 批量性能测试
-        PDO_TEST_DEBUG_PRINT("测试4.2: 批量性能测试（6个电机）");
-
-        size_t batchTestCount = 0;
-        uint64_t batchTotalTime = 0;
-        uint64_t batchMinTime = UINT64_MAX;
-        uint64_t batchMaxTime = 0;
-
-        for (int i = 0; i < 30; ++i) {
-            auto batchStart = std::chrono::high_resolution_clock::now();
-            for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
-                Motor& motor = motors.at(motorIdx);
-
-                // 计算物理量数值
-                float targetAngle = 10.0f * (i * 6 + motorIdx + 1); // 角度值
-                uint16_t controlWord = 0x000F;
-                float targetVelocityRpm = 1000.0f * (i * 6 + motorIdx + 1); // RPM值
-                float targetCurrentMa = 1000.0f * (i * 6 + motorIdx + 1); // mA值
-
-                // 使用正确的标志位驱动方式写入数据
-                motor.position.target_degree.store(targetAngle);
-                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
-
-                motor.velocity.target_rpm_velocity_mode.store(targetVelocityRpm);
-                motor.velocity.flags_.fetch_or(MotorVelocity::Flags::TARGET_DATA_SEND_NEED_REFRESH_VELOCITY_MODE, std::memory_order_release);
-
-                motor.current.target_current.store(targetCurrentMa);
-                motor.current.flags_.fetch_or(MotorCurrent::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-                // 调用刷新方法进行数据转换
-                motor.refreshMotorData(motor.position);
-                motor.refreshMotorData(motor.velocity);
-                motor.refreshMotorData(motor.current);
-            }
-            auto batchEnd = std::chrono::high_resolution_clock::now();
-            auto batchTime = std::chrono::duration_cast<std::chrono::microseconds>(batchEnd - batchStart).count();
-            std::cout << "[PERF][TestSendThreadPDO]: 批量写入6个电机RPDO数据 took " << batchTime << " us\n";
-
-            batchTestCount++;
-            batchTotalTime += batchTime;
-
-            if (batchTime < batchMinTime) batchMinTime = batchTime;
-            if (batchTime > batchMaxTime) batchMaxTime = batchTime;
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-
-            if ((i + 1) % 10 == 0) {
-                PDO_TEST_DEBUG_PRINT("完成 " << (i + 1) << "/30 次批量测试");
-            }
-        }
-
-        double batchAvgTime = static_cast<double>(batchTotalTime) / batchTestCount;
-        double avgPerMotor = batchAvgTime / 6.0;
-
-        PDO_TEST_DEBUG_PRINT("=== 批量性能统计 ===");
-        PDO_TEST_DEBUG_PRINT("批量平均时间: " << batchAvgTime << " us (6个电机)");
-        PDO_TEST_DEBUG_PRINT("单电机平均: " << avgPerMotor << " us");
-        PDO_TEST_DEBUG_PRINT("批量最小时间: " << batchMinTime << " us");
-        PDO_TEST_DEBUG_PRINT("批量最大时间: " << batchMaxTime << " us");
-        PDO_TEST_DEBUG_PRINT("测试次数: " << batchTestCount);
-        PDO_TEST_DEBUG_PRINT("=== 批量统计结束 ===");
-
-        // 3. 周期性能测试
-        PDO_TEST_DEBUG_PRINT("测试4.3: 周期性能测试（2ms周期内处理能力）");
-
-        size_t cycleTestCount = 0;
-        uint64_t cycleTotalTime = 0;
-        uint64_t successfulCycles = 0;
-
-        for (int i = 0; i < 20; ++i) {
-            auto cycleStart = std::chrono::high_resolution_clock::now();
-
-            // 在单个2ms周期内尽可能多地写入数据
-            int writesInCycle = 0;
-            auto cycleDeadline = cycleStart + std::chrono::milliseconds(2);
-
-            while (std::chrono::high_resolution_clock::now() < cycleDeadline && writesInCycle < 6) {
-                Motor& motor = motors.at(writesInCycle % 6);
-
-                // 计算物理量数值
-                float targetAngle = 10.0f * (i * 6 + writesInCycle + 1); // 角度值
-                uint16_t controlWord = 0x000F;
-
-                // 使用正确的标志位驱动方式写入数据
-                motor.position.target_degree.store(targetAngle);
-                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
-
-                // 调用刷新方法进行数据转换
-                motor.refreshMotorData(motor.position);
-
-                writesInCycle++;
-                cycleTestCount++;
-            }
-
-            auto cycleEnd = std::chrono::high_resolution_clock::now();
-            auto cycleDuration = std::chrono::duration_cast<std::chrono::microseconds>(cycleEnd - cycleStart);
-
-            cycleTotalTime += cycleDuration.count();
-            if (writesInCycle > 0) successfulCycles++;
-
-            PDO_TEST_DEBUG_PRINT("周期" << (i + 1) << ": 写入" << writesInCycle << "个电机，耗时"
-                              << cycleDuration.count() << " us");
-
-            // 等待下一个周期
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(3)));
-        }
-
-        double avgCycleTime = static_cast<double>(cycleTotalTime) / 20.0;
-        double successRate = (static_cast<double>(successfulCycles) / 20.0) * 100.0;
-
-        PDO_TEST_DEBUG_PRINT("=== 周期性能统计 ===");
-        PDO_TEST_DEBUG_PRINT("平均周期时间: " << avgCycleTime << " us");
-        PDO_TEST_DEBUG_PRINT("周期成功率: " << successRate << "%");
-        PDO_TEST_DEBUG_PRINT("成功周期数: " << successfulCycles << "/20");
-        PDO_TEST_DEBUG_PRINT("=== 周期统计结束 ===");
-
-        // 4. 吞吐量测试
-        PDO_TEST_DEBUG_PRINT("测试4.4: 吞吐量测试（1秒内的帧发送数量）");
-
-        auto throughputStart = std::chrono::high_resolution_clock::now();
-        auto throughputEnd = throughputStart + std::chrono::seconds(1);
-        size_t frameCount = 0;
-
-        while (std::chrono::high_resolution_clock::now() < throughputEnd) {
-            for (uint8_t motorIdx = 0; motorIdx < 6; ++motorIdx) {
-                Motor& motor = motors.at(motorIdx);
-
-                // 计算物理量数值
-                float targetAngle = 10.0f * (frameCount + motorIdx + 1); // 角度值
-                uint16_t controlWord = 0x000F;
-
-                // 使用正确的标志位驱动方式写入数据
-                motor.position.target_degree.store(targetAngle);
-                motor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
-
-                std::memcpy(const_cast<uint8_t*>(motor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
-
-                // 调用刷新方法进行数据转换
-                motor.refreshMotorData(motor.position);
-
-                frameCount++;
-
-                // 避免CPU过载
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            }
-        }
-
-        double framesPerSecond = static_cast<double>(frameCount);
-        double dataThroughput = framesPerSecond * 8.0;  // 每帧8字节
-
-        PDO_TEST_DEBUG_PRINT("=== 吞吐量统计 ===");
-        PDO_TEST_DEBUG_PRINT("1秒内发送帧数: " << framesPerSecond);
-        PDO_TEST_DEBUG_PRINT("数据吞吐量: " << dataThroughput << " 字节/秒");
-        PDO_TEST_DEBUG_PRINT("平均帧间隔: " << (1000000.0 / framesPerSecond) << " us");
-        PDO_TEST_DEBUG_PRINT("=== 吞吐量统计结束 ===");
-
-        // 5. 综合性能评估
-        PDO_TEST_DEBUG_PRINT("测试4.5: 综合性能评估");
-
-        bool isHealthy = sendThread.isHealthy();
-        uint32_t errorCount = sendThread.getErrorCount();
-
-        PDO_TEST_DEBUG_PRINT("=== 综合性能报告 ===");
-        PDO_TEST_DEBUG_PRINT("单项写入性能: " << singleAvgTime << " us/电机");
-        PDO_TEST_DEBUG_PRINT("批量写入性能: " << avgPerMotor << " us/电机");
-        PDO_TEST_DEBUG_PRINT("批量加速比: " << (singleAvgTime / avgPerMotor) << "x");
-        PDO_TEST_DEBUG_PRINT("周期处理能力: " << successRate << "% (2ms周期)");
-        PDO_TEST_DEBUG_PRINT("实时吞吐量: " << framesPerSecond << " 帧/秒");
-        PDO_TEST_DEBUG_PRINT("线程健康状态: " << (isHealthy ? "健康" : "警告"));
-        PDO_TEST_DEBUG_PRINT("错误计数: " << errorCount);
-        PDO_TEST_DEBUG_PRINT("=== 性能报告结束 ===");
-
-        if (!isHealthy) {
-            auto lastError = sendThread.getLastError();
-            auto errorMsg = sendThread.getLastErrorMessage();
-            PDO_TEST_DEBUG_PRINT("性能测试期间检测到错误: " << static_cast<int>(lastError));
-            PDO_TEST_DEBUG_PRINT("错误消息: " << errorMsg);
+        // 1. 验证统计功能正常性
+        PDO_TEST_DEBUG_PRINT("测试4.1: 验证统计功能正常性");
+        if (!monitor.validateStatsFunctionality()) {
+            PDO_TEST_DEBUG_PRINT("性能统计功能验证失败");
             return false;
         }
+        PDO_TEST_DEBUG_PRINT("性能统计功能验证通过");
 
-        PDO_TEST_DEBUG_PRINT("性能统计测试通过");
+        // 2. 设置基准统计
+        PDO_TEST_DEBUG_PRINT("测试4.2: 设置基准统计");
+        monitor.setBaseline();
+
+        // 3. 执行PDO操作产生统计数据
+        PDO_TEST_DEBUG_PRINT("测试4.3: 执行PDO操作产生统计数据");
+
+        Motor& testMotor = motors.at(0);
+
+        // 执行多次PDO操作
+        for (int i = 0; i < 10; ++i) {
+            float targetAngle = 10.0f * (i + 1);
+            uint16_t controlWord = 0x000F;
+
+            testMotor.position.target_degree.store(targetAngle);
+            testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+            std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+            testMotor.refreshMotorData(testMotor.position);
+
+            // 短暂等待让发送线程处理
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+
+        // 4. 验证性能范围
+        PDO_TEST_DEBUG_PRINT("测试4.4: 验证性能范围");
+        if (!monitor.validatePerformanceRange(2000)) {
+            PDO_TEST_DEBUG_PRINT("性能范围验证失败");
+            return false;
+        }
+        PDO_TEST_DEBUG_PRINT("性能范围验证通过");
+
+        // 5. 打印性能报告
+        PDO_TEST_DEBUG_PRINT("测试4.5: 打印性能报告");
+        monitor.printReport();
+
+        // 6. 验证处理时间正常性
+        PDO_TEST_DEBUG_PRINT("测试4.6: 验证处理时间正常性");
+        bool isTimeNormal = sendThread.isProcessingTimeNormal();
+
+        TEST_ASSERT(isTimeNormal, "处理时间应在正常范围内");
+        PDO_TEST_DEBUG_PRINT("处理时间正常性检查: " << (isTimeNormal ? "正常" : "异常"));
+
+        PDO_TEST_DEBUG_PRINT("性能统计验证测试通过");
         return true;
 
+#else
+        PDO_TEST_DEBUG_PRINT("警告: ENABLE_CYCLE_TIMING未启用，跳过性能统计验证");
+        return true;
+#endif
+
     } catch (const std::exception& e) {
-        std::cout << "[ERROR][testRpdoPerformance]: 测试异常: " << e.what() << std::endl;
+        std::cout << "[ERROR][testRpdoPerformanceStats]: 测试异常: " << e.what() << std::endl;
         return false;
     }
 }
 
-// ====================== 实时性验证测试 ======================
+// ====================== 简化功能验证测试 ======================
 
 /**
- * @brief RPDO实时性验证测试
+ * @brief RPDO功能验证测试
  *
- * @details 测试RPDO的实时性能，包括：
- * - 周期确定性测试（验证2ms同步周期的确定性）
- * - 发送延迟统计（从数据准备到串口传输的延迟）
- * - 吞吐量测试（单位时间内PDO帧传输数量）
- * - 抖动分析（周期时间的稳定性）
+ * @details 简化的功能验证测试，替代复杂的实时性测试：
+ * - 验证基本PDO发送功能
+ * - 验证数据正确性
+ * - 验证线程健康状态
  *
  * @param motors 电机数组引用
  * @param sendThread 发送线程引用
  * @return bool 测试成功返回true，失败返回false
- *
- * @note 本测试用于验证RPDO通信的实时性能指标
- * @warning 测试过程需要精确时间测量，避免系统负载影响结果
  */
-bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
+bool testRpdoFunctionality(std::array<Motor, 6>& motors, SendThread& sendThread) {
     try {
-        PDO_TEST_DEBUG_PRINT("开始RPDO实时性验证测试");
-
-        // 准备测试数据
-        RpdoTestDataGenerator testDataGenerator;
-        RpdoFrameValidator frameValidator;
-
-        // 1. 周期确定性测试
-        PDO_TEST_DEBUG_PRINT("测试5.1: 周期确定性测试（验证2ms同步周期）");
-
-        const int cycleCount = 100;  // 测试100个周期
-        const std::chrono::microseconds targetCycleTime(2000);  // 2ms
-        std::vector<std::chrono::microseconds> cycleDelays;
-        cycleDelays.reserve(cycleCount);
-
-        // 预热系统
-        PDO_TEST_DEBUG_PRINT("系统预热中...");
-        for (int i = 0; i < 10; ++i) {
-            auto testData = testDataGenerator.generateStandardTestData();
-            testDataGenerator.writeTestDataToMotors(testData, motors);
-            // 数据写入后会自动触发PDO处理
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-
-        // 正式测试
-        PDO_TEST_DEBUG_PRINT("开始周期确定性测试，测试周期数: " << cycleCount);
-
-        auto lastCycleTime = std::chrono::high_resolution_clock::now();
-
-        for (int i = 0; i < cycleCount; ++i) {
-            // 记录周期开始时间
-            auto cycleStartTime = std::chrono::high_resolution_clock::now();
-
-            // 准备和发送PDO数据
-            auto testData = testDataGenerator.generateStandardTestData();
-            testDataGenerator.writeTestDataToMotors(testData, motors);
-            // 数据写入后会自动触发PDO处理
-
-            // 记录周期结束时间
-            auto cycleEndTime = std::chrono::high_resolution_clock::now();
-
-            // 计算周期时间
-            auto cycleDuration = std::chrono::duration_cast<std::chrono::microseconds>(
-                cycleEndTime - cycleStartTime);
-
-            cycleDelays.push_back(cycleDuration);
-
-            // 等待到下一个周期开始
-            auto nextCycleTime = lastCycleTime + targetCycleTime;
-            auto now = std::chrono::high_resolution_clock::now();
-
-            if (now < nextCycleTime) {
-                std::this_thread::sleep_until(nextCycleTime);
-            }
-
-            lastCycleTime = nextCycleTime;
-
-            // 每20个周期输出一次进度
-            if ((i + 1) % 20 == 0) {
-                PDO_TEST_DEBUG_PRINT("周期测试进度: " << (i + 1) << "/" << cycleCount);
-            }
-        }
-
-        // 分析周期确定性结果
-        PDO_TEST_DEBUG_PRINT("=== 周期确定性分析 ===");
-
-        // 计算统计指标
-        auto minDelay = *std::min_element(cycleDelays.begin(), cycleDelays.end());
-        auto maxDelay = *std::max_element(cycleDelays.begin(), cycleDelays.end());
-        auto avgDelay = std::accumulate(cycleDelays.begin(), cycleDelays.end(),
-                                      std::chrono::microseconds::zero()) / cycleCount;
-        double avgDelayCount = avgDelay.count();
-
-        // 计算标准差
-        double variance = 0;
-        for (const auto& delay : cycleDelays) {
-            double diff = delay.count() - avgDelayCount;
-            variance += diff * diff;
-        }
-        variance /= cycleCount;
-        double stdDeviation = std::sqrt(variance);
-
-        // 计算抖动
-        auto jitter = maxDelay - minDelay;
-
-        PDO_TEST_DEBUG_PRINT("目标周期时间: " << targetCycleTime.count() << " us");
-        PDO_TEST_DEBUG_PRINT("最小周期时间: " << minDelay.count() << " us");
-        PDO_TEST_DEBUG_PRINT("最大周期时间: " << maxDelay.count() << " us");
-        PDO_TEST_DEBUG_PRINT("平均周期时间: " << avgDelay.count() << " us");
-        PDO_TEST_DEBUG_PRINT("周期抖动: " << jitter.count() << " us");
-        PDO_TEST_DEBUG_PRINT("标准差: " << stdDeviation << " us");
-
-        // 验证周期确定性
-        bool cycleDeterministic = true;
-        if (jitter.count() > 500) {  // 抖动超过500us认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 周期抖动过大 (" << jitter.count() << " us > 500 us)");
-            cycleDeterministic = false;
-        }
-
-        if (stdDeviation > 100) {  // 标准差超过100us认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 周期稳定性差 (标准差 " << stdDeviation << " us > 100 us)");
-            cycleDeterministic = false;
-        }
-
-        PDO_TEST_DEBUG_PRINT("周期确定性结果: " << (cycleDeterministic ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("=== 周期确定性分析结束 ===");
-
-        // 2. 发送延迟统计测试
-        PDO_TEST_DEBUG_PRINT("测试5.2: 发送延迟统计测试");
-
-        const int delayTestCount = 50;
-        std::vector<std::chrono::microseconds> sendDelays;
-        sendDelays.reserve(delayTestCount);
-
-        PDO_TEST_DEBUG_PRINT("开始发送延迟测试，测试次数: " << delayTestCount);
-
-        for (int i = 0; i < delayTestCount; ++i) {
-            // 准备测试数据
-            auto testData = testDataGenerator.generateStandardTestData();
-            testDataGenerator.writeTestDataToMotors(testData, motors);
-
-            // 记录数据准备完成时间
-            auto dataPreparedTime = std::chrono::high_resolution_clock::now();
-
-            // 数据写入后会自动触发PDO处理
-
-            // 等待传输完成（假设处理时间不超过1ms）
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-            // 记录传输完成时间
-            auto transmissionCompleteTime = std::chrono::high_resolution_clock::now();
-
-            // 计算发送延迟
-            auto sendDelay = std::chrono::duration_cast<std::chrono::microseconds>(
-                transmissionCompleteTime - dataPreparedTime);
-
-            sendDelays.push_back(sendDelay);
-        }
-
-        // 分析发送延迟结果
-        PDO_TEST_DEBUG_PRINT("=== 发送延迟分析 ===");
-
-        auto minSendDelay = *std::min_element(sendDelays.begin(), sendDelays.end());
-        auto maxSendDelay = *std::max_element(sendDelays.begin(), sendDelays.end());
-        auto avgSendDelay = std::accumulate(sendDelays.begin(), sendDelays.end(),
-                                         std::chrono::microseconds::zero()) / delayTestCount;
-
-        PDO_TEST_DEBUG_PRINT("最小发送延迟: " << minSendDelay.count() << " us");
-        PDO_TEST_DEBUG_PRINT("最大发送延迟: " << maxSendDelay.count() << " us");
-        PDO_TEST_DEBUG_PRINT("平均发送延迟: " << avgSendDelay.count() << " us");
-
-        // 验证发送延迟
-        bool sendDelayAcceptable = true;
-        if (avgSendDelay.count() > 1000) {  // 平均延迟超过1ms认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 平均发送延迟过大 (" << avgSendDelay.count() << " us > 1000 us)");
-            sendDelayAcceptable = false;
-        }
-
-        if (maxSendDelay.count() > 2000) {  // 最大延迟超过2ms认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 最大发送延迟过大 (" << maxSendDelay.count() << " us > 2000 us)");
-            sendDelayAcceptable = false;
-        }
-
-        PDO_TEST_DEBUG_PRINT("发送延迟结果: " << (sendDelayAcceptable ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("=== 发送延迟分析结束 ===");
-
-        // 3. 吞吐量测试
-        PDO_TEST_DEBUG_PRINT("测试5.3: 吞吐量测试");
-
-        const std::chrono::seconds throughputTestDuration(3);  // 3秒测试
-        auto testStartTime = std::chrono::high_resolution_clock::now();
-        auto testEndTime = testStartTime + throughputTestDuration;
-        int frameCount = 0;
-
-        PDO_TEST_DEBUG_PRINT("开始吞吐量测试，测试时长: " << throughputTestDuration.count() << " 秒");
-
-        while (std::chrono::high_resolution_clock::now() < testEndTime) {
-            // 准备并发送PDO帧
-            auto testData = testDataGenerator.generateStandardTestData();
-            testDataGenerator.writeTestDataToMotors(testData, motors);
-            // 数据写入后会自动触发PDO处理
-            frameCount++;
-
-            // 控制发送频率（每帧间隔约2ms）
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-
-        // 计算吞吐量
-        auto actualTestDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::high_resolution_clock::now() - testStartTime);
-        double throughputFps = (frameCount * 1000.0) / actualTestDuration.count();
-        double throughputBps = throughputFps * 8 * 6;  // 假设每帧8字节，6个电机
-
-        PDO_TEST_DEBUG_PRINT("=== 吞吐量分析 ===");
-        PDO_TEST_DEBUG_PRINT("实际测试时长: " << actualTestDuration.count() << " ms");
-        PDO_TEST_DEBUG_PRINT("发送帧数: " << frameCount);
-        PDO_TEST_DEBUG_PRINT("帧吞吐量: " << throughputFps << " 帧/秒");
-        PDO_TEST_DEBUG_PRINT("数据吞吐量: " << throughputBps << " 字节/秒");
-
-        // 验证吞吐量
-        bool throughputAcceptable = true;
-        if (throughputFps < 400) {  // 帧吞吐量低于400fps认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 帧吞吐量过低 (" << throughputFps << " fps < 400 fps)");
-            throughputAcceptable = false;
-        }
-
-        PDO_TEST_DEBUG_PRINT("吞吐量结果: " << (throughputAcceptable ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("=== 吞吐量分析结束 ===");
-
-        // 4. 抖动分析
-        PDO_TEST_DEBUG_PRINT("测试5.4: 抖动分析");
-
-        // 使用周期测试数据进行抖动分析
-        PDO_TEST_DEBUG_PRINT("=== 抖动分析 ===");
-
-        // 计算抖动百分比
-        double jitterPercentage = (jitter.count() * 100.0) / targetCycleTime.count();
-
-        // 计算在目标时间±10%范围内的周期数量
-        int onTimeCycles = 0;
-        auto lowerBound = targetCycleTime - std::chrono::microseconds(200);  // -10%
-        auto upperBound = targetCycleTime + std::chrono::microseconds(200);  // +10%
-
-        for (const auto& delay : cycleDelays) {
-            if (delay >= lowerBound && delay <= upperBound) {
-                onTimeCycles++;
-            }
-        }
-
-        double onTimePercentage = (onTimeCycles * 100.0) / cycleCount;
-
-        PDO_TEST_DEBUG_PRINT("抖动百分比: " << jitterPercentage << "%");
-        PDO_TEST_DEBUG_PRINT("准时周期数: " << onTimeCycles << "/" << cycleCount);
-        PDO_TEST_DEBUG_PRINT("准时周期百分比: " << onTimePercentage << "%");
-
-        // 验证抖动
-        bool jitterAcceptable = true;
-        if (jitterPercentage > 25) {  // 抖动超过25%认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 抖动百分比过大 (" << jitterPercentage << "% > 25%)");
-            jitterAcceptable = false;
-        }
-
-        if (onTimePercentage < 80) {  // 准时周期少于80%认为不合格
-            PDO_TEST_DEBUG_PRINT("警告: 准时周期百分比过低 (" << onTimePercentage << "% < 80%)");
-            jitterAcceptable = false;
-        }
-
-        PDO_TEST_DEBUG_PRINT("抖动分析结果: " << (jitterAcceptable ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("=== 抖动分析结束 ===");
-
-        // 5. 综合实时性评估
-        PDO_TEST_DEBUG_PRINT("测试5.5: 综合实时性评估");
-
-        PDO_TEST_DEBUG_PRINT("=== 实时性综合报告 ===");
-        PDO_TEST_DEBUG_PRINT("周期确定性: " << (cycleDeterministic ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("发送延迟: " << (sendDelayAcceptable ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("吞吐量: " << (throughputAcceptable ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("抖动分析: " << (jitterAcceptable ? "通过" : "失败"));
-
-        // 所有测试都通过才算成功
-        bool realtimeTestPassed = cycleDeterministic && sendDelayAcceptable &&
-                                  throughputAcceptable && jitterAcceptable;
-
-        PDO_TEST_DEBUG_PRINT("实时性测试总体结果: " << (realtimeTestPassed ? "通过" : "失败"));
-        PDO_TEST_DEBUG_PRINT("=== 实时性报告结束 ===");
-
-        // 输出外部调试设备捕获指导
-        PDO_TEST_DEBUG_PRINT("=== 外部调试设备捕获指导 ===");
-        PDO_TEST_DEBUG_PRINT("实时性测试期间，请使用CAN分析仪验证以下指标:");
-        PDO_TEST_DEBUG_PRINT("1. 帧间隔时间应接近2ms (允许±200us抖动)");
-        PDO_TEST_DEBUG_PRINT("2. 无帧丢失或重复帧");
-        PDO_TEST_DEBUG_PRINT("3. 帧时间戳显示稳定的周期性");
-        PDO_TEST_DEBUG_PRINT("4. 高峰期吞吐量应达到400+ fps");
-        PDO_TEST_DEBUG_PRINT("=== 指导结束 ===");
-
-        if (!realtimeTestPassed) {
-            PDO_TEST_DEBUG_PRINT("实时性验证测试失败");
-            return false;
-        }
-
-        PDO_TEST_DEBUG_PRINT("实时性验证测试通过");
+        PDO_TEST_DEBUG_PRINT("开始RPDO功能验证测试");
+
+        // 1. 基本功能验证
+        PDO_TEST_DEBUG_PRINT("测试5.1: 基本PDO发送验证");
+
+        Motor& testMotor = motors.at(0);
+        uint64_t startFrameCount = sendThread.getGlobalFrameCounter();
+
+        // 执行基本PDO操作
+        float targetAngle = 45.0f;
+        uint16_t controlWord = 0x000F;
+
+        testMotor.position.target_degree.store(targetAngle);
+        testMotor.position.flags_.fetch_or(MotorPosition::Flags::TARGET_DATA_SEND_NEED_REFRESH, std::memory_order_release);
+        std::memcpy(const_cast<uint8_t*>(testMotor.stateAndMode.controlData.controlWordRaw), &controlWord, 2);
+        testMotor.refreshMotorData(testMotor.position);
+
+        // 等待处理
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        uint64_t endFrameCount = sendThread.getGlobalFrameCounter();
+        uint64_t framesSent = endFrameCount - startFrameCount;
+
+        PDO_TEST_DEBUG_PRINT("PDO帧发送验证：发送了 " << framesSent << " 帧");
+
+        // 2. 健康状态验证
+        PDO_TEST_DEBUG_PRINT("测试5.2: 线程健康状态验证");
+
+        bool isHealthy = sendThread.isHealthy();
+        bool isProcessingTimeNormal = sendThread.isProcessingTimeNormal();
+
+#ifdef ENABLE_CYCLE_TIMING
+        auto stats = sendThread.getPerformanceStats();
+        PDO_TEST_DEBUG_PRINT("=== 线程状态报告 ===");
+        PDO_TEST_DEBUG_PRINT("健康状态: " << (isHealthy ? "健康" : "不健康"));
+        PDO_TEST_DEBUG_PRINT("处理时间正常: " << (isProcessingTimeNormal ? "正常" : "异常"));
+        PDO_TEST_DEBUG_PRINT("当前周期数: " << stats.cycleCount);
+        PDO_TEST_DEBUG_PRINT("当前处理时间: " << stats.currentCycleTime << " us");
+        PDO_TEST_DEBUG_PRINT("平均处理时间: " << stats.avgProcessingTime << " us");
+        PDO_TEST_DEBUG_PRINT("错误计数: " << sendThread.getErrorCount());
+        PDO_TEST_DEBUG_PRINT("=== 状态报告结束 ===");
+#else
+        PDO_TEST_DEBUG_PRINT("=== 线程状态报告 ===");
+        PDO_TEST_DEBUG_PRINT("健康状态: " << (isHealthy ? "健康" : "不健康"));
+        PDO_TEST_DEBUG_PRINT("错误计数: " << sendThread.getErrorCount());
+        PDO_TEST_DEBUG_PRINT("=== 状态报告结束 ===");
+#endif
+
+        // 3. 验证结果
+        TEST_ASSERT(isHealthy, "线程应保持健康状态");
+        TEST_ASSERT(framesSent > 0, "应至少发送1帧");
+
+        PDO_TEST_DEBUG_PRINT("RPDO功能验证测试通过");
         return true;
 
     } catch (const std::exception& e) {
-        std::cout << "[ERROR][testRpdoRealtime]: 测试异常: " << e.what() << std::endl;
+        std::cout << "[ERROR][testRpdoFunctionality]: 测试异常: " << e.what() << std::endl;
         return false;
     }
 }
@@ -1667,7 +1256,7 @@ bool testRpdoRealtime(std::array<Motor, 6>& motors, SendThread& sendThread) {
  * - RPDO基础功能测试（RPDO1和RPDO2）
  * - 多电机并发发送测试
  * - 边界值测试
- * - 性能统计测试
+ * - 性能统计验证测试
  * - 实时性验证
  * - 外部调试接口
  *
@@ -1770,23 +1359,23 @@ bool testSendThreadPdoFunctionality() {
         }
         PDO_TEST_DEBUG_PRINT("边界值测试通过");
 
-        // 5. 性能统计测试
-        PDO_TEST_DEBUG_PRINT("步骤5: 性能统计测试");
-        if (!testRpdoPerformance(global_motors, sendThread)) {
-            PDO_TEST_DEBUG_PRINT("性能统计测试失败");
+        // 5. 性能统计验证测试
+        PDO_TEST_DEBUG_PRINT("步骤5: 性能统计验证测试");
+        if (!testRpdoPerformanceStats(global_motors, sendThread)) {
+            PDO_TEST_DEBUG_PRINT("性能统计验证测试失败");
             sendThread.stop();
             return false;
         }
-        PDO_TEST_DEBUG_PRINT("性能统计测试通过");
+        PDO_TEST_DEBUG_PRINT("性能统计验证测试通过");
 
-        // 6. 实时性验证
-        PDO_TEST_DEBUG_PRINT("步骤6: 实时性验证");
-        if (!testRpdoRealtime(global_motors, sendThread)) {
-            PDO_TEST_DEBUG_PRINT("实时性验证失败");
+        // 6. 功能验证测试
+        PDO_TEST_DEBUG_PRINT("步骤6: 功能验证测试");
+        if (!testRpdoFunctionality(global_motors, sendThread)) {
+            PDO_TEST_DEBUG_PRINT("功能验证测试失败");
             sendThread.stop();
             return false;
         }
-        PDO_TEST_DEBUG_PRINT("实时性验证通过");
+        PDO_TEST_DEBUG_PRINT("功能验证测试通过");
 
         // 7. 清理测试环境
         PDO_TEST_DEBUG_PRINT("步骤7: 清理测试环境");

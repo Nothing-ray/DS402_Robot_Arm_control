@@ -41,6 +41,9 @@
 //调试输出开关（修改后面的值）
 #define ENABLE_DEBUG_OUTPUT false
 
+// 周期计时统计开关（默认开启，测量每个周期的处理时间）
+#define ENABLE_CYCLE_TIMING
+
 
 // 调试输出控制（零开销宏）
 #if ENABLE_DEBUG_OUTPUT
@@ -117,6 +120,78 @@ private:
 
     // 全局帧数计数器（用于调试输出）
     std::atomic<uint64_t> globalFrameCounter_{0};
+
+#ifdef ENABLE_CYCLE_TIMING
+    // 周期计时统计成员变量
+    std::chrono::high_resolution_clock::time_point cycleStartTime_;      ///< 当前周期开始时间点
+    std::atomic<uint64_t> cycleProcessingTime_{0};                    ///< 当前周期处理时间（微秒）
+    std::atomic<uint64_t> minProcessingTime_{UINT64_MAX};            ///< 最小处理时间（微秒）
+    std::atomic<uint64_t> maxProcessingTime_{0};                     ///< 最大处理时间（微秒）
+    std::atomic<uint64_t> totalProcessingTime_{0};                   ///< 累计处理时间（微秒）
+    std::atomic<uint64_t> timingSampleCount_{0};                     ///< 计时样本计数
+    std::atomic<uint32_t> timingReportCounter_{0};                  ///< 报告计数器（控制输出频率）
+
+    // 计时统计配置
+    static constexpr uint32_t TIMING_REPORT_INTERVAL = 100;         ///< 计时报告间隔（周期数）
+    static constexpr uint64_t WARNING_THRESHOLD_US = 1500;         ///< 处理时间警告阈值（微秒）
+
+    /**
+     * @brief 更新计时统计信息
+     *
+     * @details 更新最小、最大、累计处理时间和样本计数
+     *
+     * @param processingTimeUs 当前周期处理时间（微秒）
+     */
+    inline void updateTimingStatistics(uint64_t processingTimeUs) {
+        // 更新样本计数
+        timingSampleCount_.fetch_add(1, std::memory_order_relaxed);
+
+        // 更新累计处理时间
+        totalProcessingTime_.fetch_add(processingTimeUs, std::memory_order_relaxed);
+
+        // 更新最小处理时间
+        uint64_t currentMin = minProcessingTime_.load(std::memory_order_relaxed);
+        while (processingTimeUs < currentMin) {
+            if (minProcessingTime_.compare_exchange_weak(currentMin, processingTimeUs,
+                                                   std::memory_order_relaxed)) {
+                break;
+            }
+        }
+
+        // 更新最大处理时间
+        uint64_t currentMax = maxProcessingTime_.load(std::memory_order_relaxed);
+        while (processingTimeUs > currentMax) {
+            if (maxProcessingTime_.compare_exchange_weak(currentMax, processingTimeUs,
+                                                   std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    }
+
+    /**
+     * @brief 输出计时统计信息
+     *
+     * @details 格式化输出计时统计信息，包括当前、最小、最大、平均处理时间
+     */
+    inline void outputTimingStatistics() {
+        uint64_t currentTime = cycleProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t minTime = minProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t maxTime = maxProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t totalTime = totalProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t sampleCount = timingSampleCount_.load(std::memory_order_relaxed);
+
+        if (sampleCount > 0) {
+            uint64_t avgTime = totalTime / sampleCount;
+
+            std::cout << "[TIMING][SendThread]: 周期#" << cycleCount_
+                      << ": 当前=" << currentTime << "μs"
+                      << ", 最小=" << minTime << "μs"
+                      << ", 最大=" << maxTime << "μs"
+                      << ", 平均=" << avgTime << "μs"
+                      << ", 样本数=" << sampleCount << std::endl;
+        }
+    }
+#endif
     
     // 错误状态管理
     enum class ThreadError {
@@ -151,7 +226,12 @@ private:
         
         while (running_.load(std::memory_order_relaxed)) {
             auto cycleStart = std::chrono::steady_clock::now();
-            
+
+#ifdef ENABLE_CYCLE_TIMING
+            // 记录周期开始时间（高精度计时）
+            cycleStartTime_ = std::chrono::high_resolution_clock::now();
+#endif
+
             // 周期监控和性能统计
             performCycleMonitoring(cycleStart);
             
@@ -180,11 +260,20 @@ private:
         // 周期性能监控（每1000个周期输出一次）
         if (cycleCount_++ % 1000 == 0 && cycleCount_ > 1) {
             auto actualPeriod = cycleStart - lastCycleTime_;
-            DEBUG_PRINT("[DEBUG][SendThread]: 周期统计: 实际周期=" 
-                      << std::chrono::duration_cast<std::chrono::microseconds>(actualPeriod).count() 
+            DEBUG_PRINT("[DEBUG][SendThread]: 周期统计: 实际周期="
+                      << std::chrono::duration_cast<std::chrono::microseconds>(actualPeriod).count()
                       << "μs, 期望=" << 2000 << "μs");
         }
         lastCycleTime_ = cycleStart;
+
+#ifdef ENABLE_CYCLE_TIMING
+        // 周期计时统计（每TIMING_REPORT_INTERVAL个周期输出一次）
+        timingReportCounter_.fetch_add(1, std::memory_order_relaxed);
+        if (timingReportCounter_.load(std::memory_order_relaxed) >= TIMING_REPORT_INTERVAL) {
+            outputTimingStatistics();
+            timingReportCounter_.store(0, std::memory_order_relaxed);
+        }
+#endif
     }
     
     /**
@@ -228,12 +317,32 @@ private:
      * @param cycleStart 当前周期开始时间
      * @param syncPeriod 同步周期（2ms）
      */
-    inline void waitForNextCycle(const std::chrono::steady_clock::time_point& cycleStart, 
+    inline void waitForNextCycle(const std::chrono::steady_clock::time_point& cycleStart,
                                 const std::chrono::milliseconds& syncPeriod) {
+#ifdef ENABLE_CYCLE_TIMING
+        // 计算并记录当前周期的处理时间
+        auto cycleEndTime = std::chrono::high_resolution_clock::now();
+        auto processingDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+            cycleEndTime - cycleStartTime_);
+        uint64_t processingTimeUs = processingDuration.count();
+
+        // 更新当前周期处理时间
+        cycleProcessingTime_.store(processingTimeUs, std::memory_order_relaxed);
+
+        // 更新统计信息
+        updateTimingStatistics(processingTimeUs);
+
+        // 检查是否超过警告阈值
+        if (processingTimeUs > WARNING_THRESHOLD_US) {
+            std::cout << "[WARNING][SendThread]: 周期处理时间过长: "
+                      << processingTimeUs << "μs (阈值: " << WARNING_THRESHOLD_US << "μs)" << std::endl;
+        }
+#endif
+
         auto elapsed = std::chrono::steady_clock::now() - cycleStart;
         if (elapsed < syncPeriod) {
             auto target = cycleStart + syncPeriod;
-            
+
             // 使用忙等待确保精确的2ms周期
             while (std::chrono::steady_clock::now() < target) {
                 // 短暂暂停避免CPU占用100%
@@ -637,6 +746,20 @@ public:
         }
 
         DEBUG_PRINT("[INFO][SendThread]: 构造函数完成，电机数量: " << static_cast<int>(motorCount_));
+
+#ifdef ENABLE_CYCLE_TIMING
+        // 初始化计时统计成员变量
+        cycleStartTime_ = std::chrono::high_resolution_clock::time_point{};
+        cycleProcessingTime_.store(0, std::memory_order_relaxed);
+        minProcessingTime_.store(UINT64_MAX, std::memory_order_relaxed);
+        maxProcessingTime_.store(0, std::memory_order_relaxed);
+        totalProcessingTime_.store(0, std::memory_order_relaxed);
+        timingSampleCount_.store(0, std::memory_order_relaxed);
+        timingReportCounter_.store(0, std::memory_order_relaxed);
+
+        DEBUG_PRINT("[DEBUG][SendThread]: 计时统计功能已启用，报告间隔: "
+                  << TIMING_REPORT_INTERVAL << " 周期");
+#endif
     }
     
     /**
@@ -770,6 +893,67 @@ public:
         lastError_.store(ThreadError::NONE, std::memory_order_relaxed);
         lastErrorMessage_.clear();
     }
+
+#ifdef ENABLE_CYCLE_TIMING
+    /**
+     * @brief 获取性能统计信息
+     * @return 统计信息结构体
+     */
+    struct PerformanceStats {
+        uint64_t currentCycleTime;      ///< 当前周期处理时间（微秒）
+        uint64_t minProcessingTime;    ///< 最小处理时间（微秒）
+        uint64_t maxProcessingTime;    ///< 最大处理时间（微秒）
+        uint64_t avgProcessingTime;    ///< 平均处理时间（微秒）
+        uint64_t totalSamples;         ///< 总样本数
+        uint64_t cycleCount;           ///< 周期计数
+    };
+
+    /**
+     * @brief 获取当前性能统计信息
+     * @return PerformanceStats 性能统计信息
+     */
+    PerformanceStats getPerformanceStats() const {
+        uint64_t current = cycleProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t minTime = minProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t maxTime = maxProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t totalTime = totalProcessingTime_.load(std::memory_order_relaxed);
+        uint64_t sampleCount = timingSampleCount_.load(std::memory_order_relaxed);
+
+        uint64_t avgTime = (sampleCount > 0) ? (totalTime / sampleCount) : 0;
+
+        return PerformanceStats{
+            current,
+            (minTime == UINT64_MAX) ? 0 : minTime,
+            maxTime,
+            avgTime,
+            sampleCount,
+            cycleCount_
+        };
+    }
+
+    /**
+     * @brief 重置性能统计信息
+     */
+    void resetPerformanceStats() {
+        cycleProcessingTime_.store(0, std::memory_order_relaxed);
+        minProcessingTime_.store(UINT64_MAX, std::memory_order_relaxed);
+        maxProcessingTime_.store(0, std::memory_order_relaxed);
+        totalProcessingTime_.store(0, std::memory_order_relaxed);
+        timingSampleCount_.store(0, std::memory_order_relaxed);
+        timingReportCounter_.store(0, std::memory_order_relaxed);
+
+        DEBUG_PRINT("[DEBUG][SendThread]: 性能统计已重置");
+    }
+
+    /**
+     * @brief 检查处理时间是否在正常范围内
+     * @return true表示处理时间正常，false表示超时或异常
+     */
+    bool isProcessingTimeNormal() const {
+        uint64_t currentTime = cycleProcessingTime_.load(std::memory_order_relaxed);
+        return currentTime <= WARNING_THRESHOLD_US;
+    }
+#endif
     
     /**
      * @brief 检查线程健康状态
