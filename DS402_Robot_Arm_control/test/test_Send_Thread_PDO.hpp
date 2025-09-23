@@ -30,7 +30,7 @@
 #define TESTING_PDO_ONLY
 
 // 启用详细调试输出
-#define PDO_TEST_DEBUG_OUTPUT
+//#define PDO_TEST_DEBUG_OUTPUT
 
 // 启用Send_Thread调试输出
 #define ENABLE_DEBUG_OUTPUT false
@@ -57,7 +57,7 @@
 
 
 // 测试配置宏
-#define ENABLE_PDO_TEST_DEBUG 1
+#define ENABLE_PDO_TEST_DEBUG 0
 #if ENABLE_PDO_TEST_DEBUG
 #define PDO_TEST_DEBUG_PRINT(msg) do { \
     std::cout << "[DEBUG][TestSendThreadPDO]: " << msg << std::endl; \
@@ -1305,7 +1305,7 @@ bool testSendThreadPdoFunctionality() {
 
         PDO_TEST_DEBUG_PRINT("串口连接成功");
 
-        // 创建发送线程
+        // 创建发送线程（简化后的构造函数）
         SendThread sendThread(sendBuffer, planBuffer, global_motors,
                              static_cast<uint8_t>(global_motors.size()),
                              serialManager, pdoMappingTable);

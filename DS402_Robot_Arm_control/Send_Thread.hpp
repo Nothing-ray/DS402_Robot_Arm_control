@@ -61,6 +61,12 @@
 
 #endif // SEND_THREAD_CONFIG_H
 
+
+//多少个周期进行一次性能统计
+#define CYCLE_COUNT 20 
+
+
+
 /**
  * @brief 发送线程管理类
  * 
@@ -77,7 +83,8 @@ private:
     
     // PDO映射表引用（用于构建CAN帧）
     const std::vector<PdoMappingEntry>& pdoMappingTable_;  ///< PDO映射表引用
-    
+
+        
     // 线程控制
     std::atomic<bool> running_{false};
     std::thread sendThread_;
@@ -94,7 +101,6 @@ private:
         
     // 预分配的PDO数据结构（固定大小数组，零分配开销）
     static constexpr size_t PDO_MAX_MOTORS = 12;  // PDO系统支持的最大电机数
-    static constexpr size_t PDO_CHANNELS_PER_MOTOR = 2;
     static constexpr size_t MAX_PDO_SLOTS = PDO_MAX_MOTORS * PDO_CHANNELS_PER_MOTOR;
     
     struct PdoDataSlot {
@@ -121,6 +127,9 @@ private:
     // 全局帧数计数器（用于调试输出）
     std::atomic<uint64_t> globalFrameCounter_{0};
 
+    // 预构建的同步帧（避免重复构建开销）
+    CanFrame syncFrame_;
+
 #ifdef ENABLE_CYCLE_TIMING
     // 周期计时统计成员变量
     std::chrono::high_resolution_clock::time_point cycleStartTime_;      ///< 当前周期开始时间点
@@ -132,7 +141,7 @@ private:
     std::atomic<uint32_t> timingReportCounter_{0};                  ///< 报告计数器（控制输出频率）
 
     // 计时统计配置
-    static constexpr uint32_t TIMING_REPORT_INTERVAL = 100;         ///< 计时报告间隔（周期数）
+    static constexpr uint32_t TIMING_REPORT_INTERVAL = CYCLE_COUNT;         ///< 计时报告间隔（周期数）
     static constexpr uint64_t WARNING_THRESHOLD_US = 1500;         ///< 处理时间警告阈值（微秒）
 
     /**
@@ -303,8 +312,33 @@ private:
         // 3. SDO处理完成后处理PDO帧
         if (shouldProcessPdo) {
             processPdoFrames();
-            
+
             DEBUG_PRINT("[DEBUG][SendThread::scheduleAndProcessTasks]: PDO处理完成");
+        }
+
+        // 4. 发送同步帧（周期结束标志）
+        sendSyncFrame();
+    }
+
+    /**
+     * @brief 发送同步帧
+     *
+     * @details 在每个周期结束时发送预构建的CANopen SYNC帧（COB-ID: 0x0080）
+     * 作为本轮通信的结束标志和下一轮通信的开始信号
+     */
+    inline void sendSyncFrame() {
+        try {
+            // 发送预构建的同步帧（避免重复构建开销）
+            serialManager_.sendFrame(syncFrame_);
+
+            DEBUG_PRINT("[DEBUG][SendThread::sendSyncFrame]: 同步帧已发送");
+
+            // 更新全局帧计数器
+            globalFrameCounter_.fetch_add(1, std::memory_order_relaxed);
+
+        } catch (const std::exception& e) {
+            // 同步帧发送失败不影响主流程，仅记录错误
+            DEBUG_PRINT("[ERROR][SendThread::sendSyncFrame]: 同步帧发送失败: " << e.what());
         }
     }
     
@@ -663,7 +697,7 @@ private:
 public:
     /**
      * @brief 构造函数
-     * 
+     *
      * @param sendBuffer 发送环形缓冲区引用
      * @param planBuffer 规划环形缓冲区引用
      * @param motors 电机数组引用（固定大小6个）
@@ -689,63 +723,23 @@ public:
             throw std::invalid_argument("[ERROR][SendThread]: 电机数量必须为6");
         }
 
-        // motorCount_ 已在初始化列表中设置，无需重复赋值
-        // motorCount_ = motorCount;  // 注释掉重复赋值
-        
-        // 预分配PDO数据结构 - 填充所有可能的COB-ID槽位
+        // 预构建同步帧（避免重复构建开销）
+        syncFrame_ = CanFrame(0x0080, nullptr, 0);
 
-        // 预填充所有可能的COB-ID槽位（零分配运行时）
-        // 修复：确保完整的初始化，避免未定义行为
-        DEBUG_PRINT("[DEBUG][SendThread]: 初始化PDO数据映射表，最大槽位数: " << static_cast<int>(MAX_PDO_SLOTS));
-        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
-            pdoDataMap_[i].cobId = 0;
-            pdoDataMap_[i].data.fill(0);
-            pdoDataMap_[i].isValid = false;
-            pdoDataMap_[i].hasValidData = false;  // 初始化新增字段
+        // 简化的PDO数据结构初始化
+        DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT, "[DEBUG][SendThread]: 初始化PDO数据槽位");
 
-            // 添加初始化验证
-            if (i == 0) {
-                DEBUG_PRINT("[DEBUG][SendThread]: 槽位[0]初始化完成: COB-ID=0x0, isValid=false, hasValidData=false");
-            }
-        }
-        
-        // 预填充当前电机配置的COB-ID
         size_t slotIndex = 0;
-        DEBUG_PRINT("[DEBUG][SendThread]: 开始初始化PDO数据槽位，电机数量: " << static_cast<int>(motorCount_));
         for (uint8_t motorIndex = 1; motorIndex <= motorCount_; ++motorIndex) {
             for (uint8_t pdoIndex = 1; pdoIndex <= PDO_CHANNELS_PER_MOTOR; ++pdoIndex) {
                 uint32_t cobId = toRpdoCobId(motorIndex, pdoIndex);
                 pdoDataMap_[slotIndex].cobId = cobId;
                 pdoDataMap_[slotIndex].data.fill(0);
                 pdoDataMap_[slotIndex].isValid = true;
-                pdoDataMap_[slotIndex].hasValidData = false;  // 初始化新增字段
-
-                // 添加COB-ID初始化验证调试输出
-                DEBUG_PRINT("[DEBUG][SendThread]: 初始化槽位[" << static_cast<int>(slotIndex)
-                          << "]: 电机" << static_cast<int>(motorIndex)
-                          << ", PDO" << static_cast<int>(pdoIndex)
-                          << ", COB-ID=0x" << std::hex << cobId << std::dec);
+                pdoDataMap_[slotIndex].hasValidData = false;
                 slotIndex++;
             }
         }
-
-        // 添加COB-ID初始化完整性验证
-        DEBUG_PRINT("[DEBUG][SendThread]: PDO数据槽位初始化完成，验证COB-ID范围:");
-        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
-            if (pdoDataMap_[i].isValid) {
-                uint32_t cobId = pdoDataMap_[i].cobId;
-                DEBUG_PRINT("[DEBUG][SendThread]: 槽位[" << static_cast<int>(i)
-                          << "] COB-ID=0x" << std::hex << cobId << std::dec);
-
-                // 验证COB-ID是否在预期范围内
-                if (cobId < 0x200 || cobId > 0x506) {
-                    DEBUG_PRINT("[ERROR][SendThread]: 检测到非法COB-ID: 0x" << std::hex << cobId
-                              << " 在槽位[" << static_cast<int>(i) << "] - 应在0x200-0x506范围内" << std::dec);
-                }
-            }
-        }
-
-        DEBUG_PRINT("[INFO][SendThread]: 构造函数完成，电机数量: " << static_cast<int>(motorCount_));
 
 #ifdef ENABLE_CYCLE_TIMING
         // 初始化计时统计成员变量
@@ -966,85 +960,69 @@ public:
     // ====================== PDO处理函数实现 ======================
 
     /**
-     * @brief 高效查找PDO数据槽位
+     * @brief 直接计算PDO数据槽位索引 (O(1)无查找开销)
      *
-     * @details 根据COB-ID快速查找对应的PDO数据槽位，采用线性查找算法。
-     * 由于MAX_PDO_SLOTS较小（通常为24），线性查找具有更好的缓存性能。
+     * @details 根据电机索引和PDO索引直接计算槽位位置，完全消除查找开销。
+     * 在固定电机数量配置下，这是最高效的访问方式。
      *
-     * @param cobId 要查找的COB-ID
-     * @return PdoDataSlot* 找到的槽位指针，未找到返回nullptr
+     * @param motorIndex 电机索引 (1-6)
+     * @param pdoIndex PDO索引 (1-2)
+     * @return size_t 槽位索引
      *
-     * @note 该函数替代了原本内嵌在数据填充逻辑中的查找代码
-     * @warning 返回指针的生命周期与pdoDataMap_相同，调用者需注意使用时效性
+     * @note 此函数假设电机数量固定为6，PDO通道固定为2
+     * @warning 仅在已知有效范围内调用，不进行边界检查
      */
-    inline PdoDataSlot* findPdoSlot(uint32_t cobId) {
-        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
-            if (pdoDataMap_[i].isValid && pdoDataMap_[i].cobId == cobId) {
-                return &pdoDataMap_[i];
-            }
+    inline size_t calculatePdoSlotIndex(uint8_t motorIndex, uint8_t pdoIndex) {
+        return (motorIndex - 1) * PDO_CHANNELS_PER_MOTOR + (pdoIndex - 1);
+    }
+
+    /**
+     * @brief 批量清零特定电机的PDO槽位
+     *
+     * @details 直接计算并清零指定电机的所有PDO槽位，消除查找开销。
+     *
+     * @param motorIndex 电机索引 (1-6)
+     */
+    inline void clearMotorPdoSlots(uint8_t motorIndex) {
+        size_t baseIndex = (motorIndex - 1) * PDO_CHANNELS_PER_MOTOR;
+        for (size_t i = 0; i < PDO_CHANNELS_PER_MOTOR; ++i) {
+            size_t slotIndex = baseIndex + i;
+            pdoDataMap_[slotIndex].data.fill(0);
+            pdoDataMap_[slotIndex].hasValidData = false;
         }
-        return nullptr;
     }
 
     /**
      * @brief 验证PDO数据完整性
      *
-     * @details 检查PDO数据的一致性，包括：
-     * - 有数据但标志位未设置的情况
-     * - 标志位设置但数据全为零的情况
-     * - 无效COB-ID或重复COB-ID的情况
+     * @details 简化版本：仅在调试模式下验证数据一致性
+     * 生产环境中此函数为空实现，消除运行时开销
      *
-     * @return bool 验证成功返回true，发现问题返回false
+     * @return bool 始终返回true（生产模式）
      *
-     * @note 该函数主要用于调试和诊断，可在发送前调用确保数据正确性
-     * @warning 验证失败时会产生调试输出，但不会阻止PDO发送
+     * @note 该函数仅用于调试，在发布版本中被优化为空操作
      */
     inline bool validatePdoDataIntegrity() {
+#if ENABLE_DEBUG_OUTPUT
         bool hasErrors = false;
         std::unordered_set<uint32_t> foundCobIds;
 
         for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
             if (!pdoDataMap_[i].isValid) continue;
 
-            // 检查重复COB-ID
+            // 仅在调试时检查重复COB-ID
             if (foundCobIds.find(pdoDataMap_[i].cobId) != foundCobIds.end()) {
                 DEBUG_PRINT("[ERROR][SendThread::validatePdoDataIntegrity]: 发现重复COB-ID: 0x"
                           << std::hex << pdoDataMap_[i].cobId << std::dec);
                 hasErrors = true;
             }
             foundCobIds.insert(pdoDataMap_[i].cobId);
-
-            // 验证数据一致性
-            bool allZero = true;
-            for (uint8_t byte : pdoDataMap_[i].data) {
-                if (byte != 0) {
-                    allZero = false;
-                    break;
-                }
-            }
-
-            // 检查逻辑1：有数据但标志位未设置
-            if (!allZero && !pdoDataMap_[i].hasValidData) {
-                DEBUG_PRINT("[WARN][SendThread::validatePdoDataIntegrity]: 检测到未标记的有效数据，COB-ID=0x"
-                          << std::hex << pdoDataMap_[i].cobId << std::dec);
-                // 这不是错误，但值得关注
-            }
-
-            // 检查逻辑2：标志位设置但数据全为零
-            if (allZero && pdoDataMap_[i].hasValidData) {
-                DEBUG_PRINT("[INFO][SendThread::validatePdoDataIntegrity]: 标记有效但数据全零，COB-ID=0x"
-                          << std::hex << pdoDataMap_[i].cobId << std::dec);
-                // 这是正常情况，比如目标位置为0
-            }
-
-            DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT,
-                         "[DEBUG][SendThread::validatePdoDataIntegrity]: 验证COB-ID=0x"
-                         << std::hex << pdoDataMap_[i].cobId
-                         << ", 有效=" << pdoDataMap_[i].hasValidData
-                         << ", 全零=" << allZero << std::dec);
         }
 
         return !hasErrors;
+#else
+        return true; // 生产模式直接返回成功
+#endif
     }
 
     /**
@@ -1059,29 +1037,12 @@ public:
     inline size_t buildAndSendPdoFrames() {
         size_t totalFramesProcessed = 0;
 
-        // 步骤1：修复后的清零逻辑 - 基于COB-ID一次性清零，避免重复清零
-        std::unordered_set<uint32_t> processedCobIds;
-        for (const auto& mapping : pdoMappingTable_) {
-            if (!mapping.isTx) {  // 只处理RPDO
-                uint32_t cobId = toRpdoCobId(mapping.motorIndex, mapping.pdoIndex);
-
-                // 只清零每个COB-ID一次，避免重复清零同一PDO帧
-                if (processedCobIds.find(cobId) == processedCobIds.end()) {
-                    processedCobIds.insert(cobId);
-
-                    // 查找并清零对应的槽位
-                    for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
-                        if (pdoDataMap_[i].isValid && pdoDataMap_[i].cobId == cobId) {
-                            pdoDataMap_[i].data.fill(0);
-                            pdoDataMap_[i].hasValidData = false;  // 重置有效数据标志
-                            break;
-                        }
-                    }
-                }
-            }
+        // 步骤1：直接清零所有PDO槽位 - 消除查找开销
+        for (uint8_t motorIndex = 1; motorIndex <= motorCount_; ++motorIndex) {
+            clearMotorPdoSlots(motorIndex);
         }
         
-        // 步骤2：修复后的数据准备逻辑 - 填充PDO数据并增加完整性检查
+        // 步骤2：简化的数据准备逻辑 - 直接映射电机数据到PDO槽位
         for (const auto& mapping : pdoMappingTable_) {
             // 只处理RPDO（发送帧）
             if (!mapping.isTx) {
@@ -1089,171 +1050,65 @@ public:
                 // 获取对应电机引用
                 const Motor& motor = motors_[mapping.motorIndex - 1];
 
-                // 生成COB-ID
-                uint32_t cobId = toRpdoCobId(mapping.motorIndex, mapping.pdoIndex);
-
-                // 使用高效查找函数查找预分配的槽位
-                PdoDataSlot* targetSlot = findPdoSlot(cobId);
-
-                if (!targetSlot) {
-                    DEBUG_PRINT("[ERROR][SendThread::buildAndSendPdoFrames]: 找不到COB-ID对应的槽位: 0x"
-                              << std::hex << cobId << std::dec);
-                    continue;  // 找不到对应的槽位（理论上不应该发生）
-                }
+                // 直接计算槽位索引，消除查找开销
+                size_t slotIndex = calculatePdoSlotIndex(mapping.motorIndex, mapping.pdoIndex);
+                PdoDataSlot* targetSlot = &pdoDataMap_[slotIndex];
 
                 // 从电机读取数据到PDO缓冲区
                 if (!readMotorDataToPdoBuffer(motor, mapping, targetSlot->data.data())) {
-                    DEBUG_PRINT("[WARN][SendThread::buildAndSendPdoFrames]: 数据读取失败，电机="
-                              << static_cast<int>(mapping.motorIndex)
-                              << ", 映射=0x" << std::hex << mapping.index << std::dec
-                              << " - 使用默认数据");
+                    DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT, "[WARN][SendThread::buildAndSendPdoFrames]: 数据读取失败，电机="
+                              << static_cast<int>(mapping.motorIndex) << ", 使用默认数据");
 
-                    // 数据读取失败时使用默认数据而不是跳过
-                    // 根据映射类型设置不同的默认数据
-                    switch (mapping.index) {
-                        case OD_TARGET_POSITION:
-                            // 目标位置默认为0
-                            targetSlot->data[mapping.offsetInPdo] = 0;
-                            targetSlot->data[mapping.offsetInPdo + 1] = 0;
-                            targetSlot->data[mapping.offsetInPdo + 2] = 0;
-                            targetSlot->data[mapping.offsetInPdo + 3] = 0;
-                            break;
-                        case OD_CONTROL_WORD:
-                            // 控制字默认为停止状态
-                            targetSlot->data[mapping.offsetInPdo] = 0x00;
-                            targetSlot->data[mapping.offsetInPdo + 1] = 0x00;
-                            break;
-                        case OD_TARGET_VELOCITY_VELOCITY_MODE:
-                        case OD_TARGET_VELOCITY_POSITION_MODE:
-                            // 目标速度默认为0
-                            targetSlot->data[mapping.offsetInPdo] = 0;
-                            targetSlot->data[mapping.offsetInPdo + 1] = 0;
-                            break;
-                        case OD_TARGET_CURRENT:
-                            // 目标电流默认为0
-                            targetSlot->data[mapping.offsetInPdo] = 0;
-                            targetSlot->data[mapping.offsetInPdo + 1] = 0;
-                            break;
-                        default:
-                            // 未知映射类型，填充0
-                            for (uint8_t j = 0; j < mapping.size; ++j) {
-                                targetSlot->data[mapping.offsetInPdo + j] = 0;
-                            }
-                            break;
+                    // 简化的默认数据设置 - 直接内存填充
+                    std::memset(&targetSlot->data[mapping.offsetInPdo], 0, mapping.size);
+
+                    // 控制字特殊处理
+                    if (mapping.index == OD_CONTROL_WORD) {
+                        targetSlot->data[mapping.offsetInPdo] = 0x00;
+                        targetSlot->data[mapping.offsetInPdo + 1] = 0x00;
                     }
-
-                    DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 已设置默认数据，COB-ID=0x"
-                              << std::hex << cobId << std::dec);
                 }
 
-                // 无论数据读取是否成功，都标记该槽位有有效数据需要发送
-                // 这样可以确保即使读取失败，也会发送默认数据而不是空帧
+                // 标记该槽位有有效数据需要发送
                 targetSlot->hasValidData = true;
 
-                DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT,
-                             "[DEBUG][SendThread::buildAndSendPdoFrames]: 数据填充成功，电机="
-                             << static_cast<int>(mapping.motorIndex)
-                             << ", COB-ID=0x" << std::hex << cobId << std::dec);
+                DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT, "[DEBUG][SendThread::buildAndSendPdoFrames]: 电机="
+                             << static_cast<int>(mapping.motorIndex) << " 数据就绪");
             }
         }
         
-        // 步骤3：修复后的帧构建逻辑 - 基于标志位而非数据内容决定发送
+        // 步骤3：简化的帧构建逻辑 - 直接遍历已知有效的槽位
         validFrameCount_ = 0;  // 重置有效帧计数
 
-        for (size_t i = 0; i < MAX_PDO_SLOTS; ++i) {
-            if (!pdoDataMap_[i].isValid) {
-                continue;
-            }
-
-            // 修复：基于hasValidData标志位决定是否发送，而不是检查数据是否为零
-            // 这样可以确保即使数据全零（比如目标位置为0），只要标志位设置就会发送
+        // 直接遍历已知的有效槽位范围，避免无效槽位检查
+        for (size_t i = 0; i < motorCount_ * PDO_CHANNELS_PER_MOTOR; ++i) {
             if (pdoDataMap_[i].hasValidData) {
                 // 直接在数组中构建CAN帧（零堆分配）
                 CanFrame& frame = framesToSend_[validFrameCount_];
+                frame = CanFrame(pdoDataMap_[i].cobId, pdoDataMap_[i].data.data(), 8);
 
-                // 使用CAN_frame构造函数直接创建帧 - 简洁高效的设计
-                uint32_t cobId = pdoDataMap_[i].cobId;
-
-                // 验证COB-ID范围
-                if (cobId < 0x200 || cobId > 0x506) {
-                    DEBUG_PRINT("[ERROR][SendThread::buildAndSendPdoFrames]: 检测到非法COB-ID: 0x"
-                              << std::hex << cobId << "，跳过此帧" << std::dec);
-                    continue;
-                }
-
-                // 直接使用构造函数创建CAN帧 - 自动处理所有内部逻辑
-                // 使用默认参数：标准帧、数据帧、普通CAN帧、无速率切换
-                frame = CanFrame(cobId, pdoDataMap_[i].data.data(), 8);
-
-                // 添加帧构建后的验证
-                uint64_t currentGlobalFrame = globalFrameCounter_.fetch_add(1, std::memory_order_relaxed);
-                DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 构建CAN帧[全局第"
-                          << currentGlobalFrame + 1
-                          << "帧/当前批次第" << static_cast<int>(validFrameCount_)
-                          << "帧]: COB-ID=0x" << std::hex << frame.frameID
-                          << ", FrameInfo=0x" << static_cast<int>(frame.frameInfo)
-                          << ", DLC=" << std::dec << static_cast<int>(frame.dlc)
-                          << ", 数据: 0x" << std::hex
-                          << static_cast<int>(frame.data[0]) << " "
-                          << static_cast<int>(frame.data[1]) << " "
-                          << static_cast<int>(frame.data[2]) << " "
-                          << static_cast<int>(frame.data[3]) << " "
-                          << static_cast<int>(frame.data[4]) << " "
-                          << static_cast<int>(frame.data[5]) << " "
-                          << static_cast<int>(frame.data[6]) << " "
-                          << static_cast<int>(frame.data[7]) << std::dec);
+                globalFrameCounter_.fetch_add(1, std::memory_order_relaxed);
+                DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT, "[DEBUG][SendThread::buildAndSendPdoFrames]: 构建帧"
+                          << static_cast<int>(validFrameCount_));
 
                 validFrameCount_++;
-            } else {
-                DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT,
-                             "[DEBUG][SendThread::buildAndSendPdoFrames]: 跳过无效数据帧，COB-ID=0x"
-                             << std::hex << pdoDataMap_[i].cobId << std::dec);
             }
         }
         
-        // 步骤4：数据完整性验证（可选，调试用）
+        // 步骤4：简化数据完整性验证（仅调试模式）
         #if ENABLE_DEBUG_OUTPUT
-        if (!validatePdoDataIntegrity()) {
-            DEBUG_PRINT("[WARN][SendThread::buildAndSendPdoFrames]: PDO数据完整性验证发现问题");
-        }
+        validatePdoDataIntegrity(); // 仅在调试时验证
         #endif
 
-        // 步骤5：发送前的最终数据完整性验证
-        DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 开始发送前验证，有效帧数: "
-                  << static_cast<int>(validFrameCount_));
-
-        for (size_t i = 0; i < validFrameCount_; ++i) {
-            const CanFrame& frame = framesToSend_[i];
-
-            // 验证帧ID范围
-            if (frame.frameID < 0x200 || frame.frameID > 0x506) {
-                DEBUG_PRINT("[ERROR][SendThread::buildAndSendPdoFrames]: 发送前验证失败 - 非法帧ID: 0x"
-                          << std::hex << frame.frameID << std::dec);
-                validFrameCount_ = 0; // 取消所有发送
-                 return 0;
-            }
-
-            // 验证DLC
-            if (frame.dlc != 8) {
-                DEBUG_PRINT("[ERROR][SendThread::buildAndSendPdoFrames]: 发送前验证失败 - 错误DLC: "
-                          << static_cast<int>(frame.dlc) << " (期望8)");
-                validFrameCount_ = 0; // 取消所有发送
-                return 0;
-            }
-        }
-
-        // 步骤6：批量发送CAN帧
+        // 步骤5：直接批量发送CAN帧
         if (validFrameCount_ > 0) {
-            try {
-                DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 开始批量发送CAN帧，帧数: "
-                          << static_cast<int>(validFrameCount_));
+            DEBUG_PRINT_IF(ENABLE_DEBUG_OUTPUT, "[DEBUG][SendThread::buildAndSendPdoFrames]: 发送"
+                      << static_cast<int>(validFrameCount_) << "帧");
 
+            try {
                 // 直接使用预分配数组发送，避免vector拷贝开销
                 size_t sentFrames = serialManager_.sendFramesBatch(
                     {framesToSend_.data(), framesToSend_.data() + validFrameCount_});
-
-                DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 批量发送完成，成功帧数: "
-                          << static_cast<int>(sentFrames));
 
                 totalFramesProcessed = sentFrames;
             } catch (const std::exception& e) {
@@ -1261,8 +1116,6 @@ public:
                            std::string("PDO批量发送失败: ") + e.what());
                 return 0;
             }
-        } else {
-            DEBUG_PRINT("[DEBUG][SendThread::buildAndSendPdoFrames]: 无有效帧需要发送");
         }
 
         return totalFramesProcessed;

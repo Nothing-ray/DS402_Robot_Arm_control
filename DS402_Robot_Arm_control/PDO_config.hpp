@@ -43,6 +43,10 @@
 #include <cstdint>
 #include <vector>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <array>
+#include <sstream>
 #include "class_motor.hpp"
 
 
@@ -52,6 +56,9 @@
 
 // ====================== 编译期配置宏 ====================== //
 // 通过定义这些宏可以集中配置PDO映射关系
+
+// PDO配置常量
+static constexpr size_t PDO_CHANNELS_PER_MOTOR = 2;  // 每个电机的PDO通道数（RPDO1+RPDO2）
 
 
 /** 
@@ -293,5 +300,6 @@ inline uint32_t toTpdoCobId(uint8_t motorIndex, uint8_t pdoIndex) {
     default: throw std::out_of_range("Invalid TPDO index (1-4)");
     }
 }
+
 
 #endif // PDO_CONFIG_HPP
