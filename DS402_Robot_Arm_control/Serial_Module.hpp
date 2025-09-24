@@ -146,7 +146,7 @@ constexpr size_t MAX_BATCH_FRAMES = 24;
  * 
  * ## 主要特性
  * - **中心化实例管理**: 避免资源重复创建，确保全局唯一串口实例
- * - **线程安全隔离**: 独立的发送、接收、连接互斥锁，确保操作互不干扰
+ * - **无锁发送**: USB串口设备在驱动层面是线程安全的，发送过程无需加锁
  * - **高性能同步发送**: 支持同步批量发送，最大化总线利用率
  * - **批量处理优化**: 支持批量帧发送，减少系统调用开销
  * - **自动错误恢复**: 连接异常自动检测和重连机制
@@ -160,10 +160,11 @@ constexpr size_t MAX_BATCH_FRAMES = 24;
  * ## 编译时配置
  * 通过定义以下宏启用特定功能：
  * - `ENABLE_SERIAL_DEBUG`: 启用调试输出
- * 
- * @note 所有串口操作都通过本模块进行，确保线程安全和资源一致性
+ *
+ * @note 所有串口操作都通过本模块进行，发送操作利用USB设备的线程安全特性
  * @warning 串口实例由主线程创建和管理，工作线程通过引用访问
- * 
+ * @warning 连接操作仍然需要互斥锁保护，但发送和接收操作无锁
+ *
  * @par 使用示例:
  * @code
  * // 创建全局实例
@@ -185,18 +186,17 @@ class SerialPortManager {
 private:
     boost::asio::io_service ioService_;              ///< Boost.Asio I/O服务
     std::unique_ptr<boost::asio::serial_port> serialPort_; ///< 串口对象
-    
-    std::mutex sendMutex_;                           ///< 发送操作互斥锁
-    std::mutex receiveMutex_;                        ///< 接收操作互斥锁
-    std::mutex connectMutex_;                        ///< 连接管理互斥锁
-    
+
+    std::mutex connectMutex_;                        ///< 连接管理互斥锁（仅连接操作需要保护）
+
     std::string portName_;                           ///< 串口设备名称
     unsigned int baudRate_;                          ///< 波特率
     std::atomic<bool> connected_{false};             ///< 连接状态标志
-    
+
     // 预分配发送缓冲区（64字节对齐，1024字节大小）
     alignas(64) std::array<uint8_t, 1024> sendBuffer_;
-    std::mutex bufferMutex_;                         ///< 缓冲区操作互斥锁
+    // 预分配接收缓冲区（64字节对齐，避免伪共享）
+    alignas(64) std::array<uint8_t, SERIAL_BUFFER_SIZE> receiveBuffer_;
 
     // 线程局部预分配对象（避免重复内存分配）
     static thread_local std::ostringstream debugStream_;    ///< 调试输出流
@@ -273,6 +273,7 @@ public:
     SerialPortManager() {
         // 初始化预分配缓冲区
         sendBuffer_.fill(0);
+        receiveBuffer_.fill(0);
     }
     
     /**
@@ -358,10 +359,7 @@ public:
 // 开始性能统计
             PERF_START();
 
-            {
-                std::lock_guard<std::mutex> lock(sendMutex_);
-                boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
-            }
+            boost::asio::write(*serialPort_, boost::asio::buffer(binaryData.data(), binaryData.size()));
 
             // 输出发送的帧内容（使用预分配对象）
             DEBUG_PRINT_HEX("SerialPortManager::sendFrame", binaryData.data(), binaryData.size());
@@ -436,12 +434,9 @@ public:
         for (size_t i = 0; i < actualCount; ++i) {
             try {
                 // 发送单帧数据
-                {
-                    std::lock_guard<std::mutex> lock(sendMutex_);
-                    boost::asio::write(*serialPort_, 
-                        boost::asio::buffer(sendBuffer_.data() + i * CAN_FRAME_SIZE, CAN_FRAME_SIZE));
-                }
-                
+                boost::asio::write(*serialPort_,
+                    boost::asio::buffer(sendBuffer_.data() + i * CAN_FRAME_SIZE, CAN_FRAME_SIZE));
+
                 successCount++;
 
                 DEBUG_PRINT("[DEBUG][SerialPortManager::sendFramesBatch]: "
@@ -479,8 +474,6 @@ public:
             return false;
         }
         
-        std::lock_guard<std::mutex> lock(sendMutex_);
-        
         try {
             boost::asio::write(*serialPort_, boost::asio::buffer(data.data(), data.size()));
             return true;
@@ -499,14 +492,12 @@ public:
      */
     std::vector<uint8_t> receiveData(size_t maxSize) {
         std::vector<uint8_t> buffer(maxSize);
-        
+
         if (!isConnected()) {
             DEBUG_PRINT("[WARN][SerialPortManager::receiveData]: 串口未连接");
             return buffer;
         }
-        
-        std::lock_guard<std::mutex> lock(receiveMutex_);
-        
+
         try {
             size_t bytesRead = serialPort_->read_some(boost::asio::buffer(buffer.data(), maxSize));
             buffer.resize(bytesRead);
@@ -518,7 +509,67 @@ public:
             return {};
         }
     }
-    
+
+    /**
+     * @brief 从串口接收数据并写入环形缓冲区（无锁版本）
+     *
+     * @param targetBuffer 目标环形缓冲区引用
+     * @return 成功接收的字节数，失败返回0
+     *
+     * @details 使用Boost.Asio的read_some()函数进行非阻塞读取，
+     *          将接收到的数据直接写入目标环形缓冲区。
+     *          USB串口设备是线程安全的，不需要额外的锁保护。
+     *
+     * @note 该函数设计为高性能接收，使用内联优化减少调用开销
+     * @warning 确保目标环形缓冲区有足够空间，否则写入可能失败
+     */
+    inline size_t receiveToBuffer(CircularBuffer& targetBuffer) {
+        // 检查连接状态
+        if (!isConnected()) {
+            DEBUG_PRINT("[WARN][receiveToBuffer]: 串口未连接");
+            return 0;
+        }
+
+        try {
+            // 性能统计开始
+            PERF_START();
+
+            // 直接使用read_some()读取数据到预分配缓冲区
+            size_t bytesRead = serialPort_->read_some(
+                boost::asio::buffer(receiveBuffer_.data(), receiveBuffer_.size())
+            );
+
+            // 如果读取到数据，写入目标环形缓冲区
+            if (bytesRead > 0) {
+                // 直接将数据转移到环形缓冲区，避免额外拷贝
+                if (!targetBuffer.pushBytes(receiveBuffer_.data(), bytesRead)) {
+                    DEBUG_PRINT("[ERROR][receiveToBuffer]: 环形缓冲区写入失败");
+                    return 0;
+                }
+
+                // 输出调试信息
+                DEBUG_PRINT("[DEBUG][receiveToBuffer]: 接收成功，字节数: " << bytesRead);
+                DEBUG_PRINT_HEX("receiveToBuffer", receiveBuffer_.data(), bytesRead);
+
+                // 性能统计结束
+                PERF_END("receiveToBuffer");
+            }
+
+            return bytesRead;
+        }
+        catch (const boost::system::system_error& e) {
+            // 处理Boost系统错误（如串口断开）
+            connected_.store(false, std::memory_order_release);
+            DEBUG_PRINT("[ERROR][receiveToBuffer]: Boost系统错误: " << e.what());
+            return 0;
+        }
+        catch (const std::exception& e) {
+            // 处理其他异常
+            DEBUG_PRINT("[ERROR][receiveToBuffer]: 异常: " << e.what());
+            return 0;
+        }
+    }
+
     /**
      * @brief 重新连接串口
      * 
@@ -580,12 +631,8 @@ public:
 
         if (sendSize == 0) return 0;
         
-        // 第二阶段：最小化锁范围 - 仅保护缓冲区填充操作
-        size_t bytesRead;
-        {
-            std::lock_guard<std::mutex> lock(bufferMutex_);
-            bytesRead = buffer.popBytes(sendBuffer_.data(), sendSize);
-        }
+        // 第二阶段：从缓冲区读取数据到发送缓冲区
+        size_t bytesRead = buffer.popBytes(sendBuffer_.data(), sendSize);
         
         if (bytesRead == 0) {
             return 0;
@@ -606,11 +653,8 @@ public:
 // 开始性能统计
             PERF_START();
 
-            {
-                std::lock_guard<std::mutex> lock(sendMutex_);
-                // 同步发送所有数据
-                boost::asio::write(*serialPort_, boost::asio::buffer(sendBuffer_.data(), bytesToSend));
-            }
+            // 同步发送所有数据
+          boost::asio::write(*serialPort_, boost::asio::buffer(sendBuffer_.data(), bytesToSend));
 
             // 输出发送统计信息
             DEBUG_PRINT("[DEBUG][SerialPortManager::sendBufferSync]: "
@@ -662,11 +706,7 @@ public:
         }
         
         // 第一阶段：一次性读取所有数据到发送缓冲区
-        size_t totalBytesRead;
-        {
-            std::lock_guard<std::mutex> lock(bufferMutex_);
-            totalBytesRead = buffer.popBytes(sendBuffer_.data(), sendBuffer_.size());
-        }
+        size_t totalBytesRead = buffer.popBytes(sendBuffer_.data(), sendBuffer_.size());
         
         if (totalBytesRead == 0) {
             return 0;
@@ -695,11 +735,8 @@ public:
                 }
                 
                 // 发送单帧数据
-                {
-                    std::lock_guard<std::mutex> lock(sendMutex_);
-                    boost::asio::write(*serialPort_, 
-                        boost::asio::buffer(sendBuffer_.data() + offset, CAN_FRAME_SIZE));
-                }
+                boost::asio::write(*serialPort_,
+                    boost::asio::buffer(sendBuffer_.data() + offset, CAN_FRAME_SIZE));
                 
                 totalBytesSent += CAN_FRAME_SIZE;
 

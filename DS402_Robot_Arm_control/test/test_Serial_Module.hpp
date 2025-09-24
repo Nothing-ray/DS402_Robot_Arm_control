@@ -333,4 +333,140 @@ inline void testSerialRealBatchSend(const std::string& portName = "COM1") {
     std::cout << "真正的批量发送测试结束" << std::endl;
 }
 
+/**
+ * @brief 串口接收测试函数
+ *
+ * @details 测试SerialPortManager的receiveToBuffer方法，创建一个简易的接收功能，
+ *          每隔10秒显示接收到的数据统计，直到按回车退出。
+ *
+ * @param portName 串口设备名称，默认"COM1"
+ */
+inline void testSerialReceive(const std::string& portName = "COM1") {
+    SerialPortManager serial;
+
+    // 连接串口
+    if (!serial.connect(portName)) {
+        std::cerr << "[ERROR][testSerialReceive]: 串口连接失败 - " << portName << std::endl;
+        return;
+    }
+
+    std::cout << "[INFO][testSerialReceive]: 串口连接成功" << std::endl;
+
+    // 创建环形缓冲区用于接收数据
+    CircularBuffer receiveBuffer;
+
+    // 统计信息
+    std::atomic<uint64_t> totalBytesReceived{0};
+    std::atomic<uint64_t> totalFramesReceived{0};
+    std::atomic<bool> running{true};
+
+    // 接收线程
+    std::thread receiveThread([&]() {
+        std::cout << "[INFO][testSerialReceive]: 接收线程启动" << std::endl;
+
+        while (running.load()) {
+            // 使用receiveToBuffer接收数据
+            size_t bytesRead = serial.receiveToBuffer(receiveBuffer);
+
+            if (bytesRead > 0) {
+                totalBytesReceived += bytesRead;
+
+                // 计算接收到的完整帧数
+                size_t framesReceived = bytesRead / CAN_FRAME_SIZE;
+                totalFramesReceived += framesReceived;
+
+                // 简要显示接收信息
+                std::cout << "[DEBUG][testSerialReceive]: 接收 " << bytesRead
+                          << " 字节 (" << framesReceived << " 帧)" << std::endl;
+            }
+
+            // 短暂休眠避免CPU占用过高
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        std::cout << "[INFO][testSerialReceive]: 接收线程结束" << std::endl;
+    });
+
+    // 统计显示线程
+    std::thread statsThread([&]() {
+        std::cout << "[INFO][testSerialReceive]: 统计线程启动" << std::endl;
+
+        while (running.load()) {
+            // 等待10秒
+            for (int i = 0; i < 100 && running.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (!running.load()) break;
+
+            // 显示统计信息
+            uint64_t bytes = totalBytesReceived.load();
+            uint64_t frames = totalFramesReceived.load();
+            uint32_t bufferSize = receiveBuffer.getUsedSpace();
+            uint32_t availableFrames = receiveBuffer.getAvailableFrames();
+
+            std::cout << "\n[STATS][testSerialReceive]: ========================" << std::endl;
+            std::cout << "[STATS][testSerialReceive]: 累计接收统计:" << std::endl;
+            std::cout << "[STATS][testSerialReceive]:   总字节数: " << bytes << std::endl;
+            std::cout << "[STATS][testSerialReceive]:   总帧数: " << frames << std::endl;
+            std::cout << "[STATS][testSerialReceive]:   缓冲区使用: " << bufferSize << " 字节" << std::endl;
+            std::cout << "[STATS][testSerialReceive]:   可用完整帧: " << availableFrames << " 帧" << std::endl;
+            std::cout << "[STATS][testSerialReceive]: =========================" << std::endl;
+
+            // 显示缓冲区内容预览（如果有数据）
+            if (availableFrames > 0) {
+                std::cout << "[STATS][testSerialReceive]: 缓冲区内容预览:" << std::endl;
+
+                // 创建临时缓冲区读取前几帧
+                std::array<uint8_t, 13 * 3> previewBuffer; // 最多显示3帧
+                size_t previewSize = std::min(static_cast<size_t>(availableFrames * CAN_FRAME_SIZE),
+                                            previewBuffer.size());
+
+                if (receiveBuffer.popBytes(previewBuffer.data(), previewSize) > 0) {
+                    for (size_t i = 0; i < previewSize; i += CAN_FRAME_SIZE) {
+                        if (i + CAN_FRAME_SIZE <= previewSize) {
+                            uint8_t dlc = previewBuffer[i];
+                            uint32_t frameID = (previewBuffer[i+1] << 24) |
+                                              (previewBuffer[i+2] << 16) |
+                                              (previewBuffer[i+3] << 8) |
+                                              previewBuffer[i+4];
+
+                            std::cout << "[STATS][testSerialReceive]:   帧 " << (i/CAN_FRAME_SIZE + 1)
+                                      << ": ID=0x" << std::hex << frameID
+                                      << ", DLC=" << std::dec << static_cast<int>(dlc) << std::endl;
+                        }
+                    }
+                }
+            }
+
+            std::cout << std::endl;
+        }
+
+        std::cout << "[INFO][testSerialReceive]: 统计线程结束" << std::endl;
+    });
+
+    std::cout << "[INFO][testSerialReceive]: 接收测试已启动" << std::endl;
+    std::cout << "[INFO][testSerialReceive]: 每10秒显示接收统计信息" << std::endl;
+    std::cout << "[INFO][testSerialReceive]: 按回车键退出测试..." << std::endl;
+
+    // 等待用户输入回车键退出
+    std::cin.get();
+
+    // 停止所有线程
+    running.store(false);
+
+    // 等待线程结束
+    receiveThread.join();
+    statsThread.join();
+
+    // 显示最终统计
+    std::cout << "\n[FINAL][testSerialReceive]: 最终统计:" << std::endl;
+    std::cout << "[FINAL][testSerialReceive]:   总接收字节数: " << totalBytesReceived.load() << std::endl;
+    std::cout << "[FINAL][testSerialReceive]:   总接收帧数: " << totalFramesReceived.load() << std::endl;
+    std::cout << "[FINAL][testSerialReceive]:   缓冲区剩余: " << receiveBuffer.getUsedSpace() << " 字节" << std::endl;
+
+    serial.disconnect();
+    std::cout << "[INFO][testSerialReceive]: 接收测试结束" << std::endl;
+}
+
 #endif // TEST_SERIAL_MODULE_HPP
